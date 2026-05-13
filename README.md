@@ -1,75 +1,66 @@
 # `gn.handler.dns`
 
-Distributed DNS-style record database surfaced as a v1 GoodNet
-handler plugin. Brings the legacy `apps/store` layer forward —
-the surface the `goodnetd-dns` binary exposed. A pluggable
-`IDnsBackend` (memory reference + sqlite reference) sits behind a
-wire dispatcher that covers seven `DNS_*` envelope types. Local
-callers reach the same surface through the `gn.dns` extension
-vtable.
+Real DNS service for a GoodNet cluster. Typed RR storage on top of
+`gn.handler.store`, three-tier resolver cascade (local store → cache
+→ upstream via c-ares), and an optional RFC 1035 UDP server-side
+listener so the plugin can act as a nameserver for a cluster's
+authoritative zone.
 
-> Not to be confused with `sdk/cpp/dns.hpp`, the SDK helper that
-> rewrites `tcp://example.com:443` into an IP literal at connect
-> time. That helper is a pure-function URI rewrite; this plugin
-> is a networked record store. See
-> [`docs/contracts/hostname-resolver.md`](../../../docs/contracts/hostname-resolver.en.md)
-> for the URI rewriter contract and
-> [`docs/contracts/dns.md`](../../../docs/contracts/dns.en.md) for
-> this plugin's wire format.
+This plugin is the answer to two distinct asks at once:
 
-## What ships
+* **C.1 from the master plan** — `_stun._udp.<host>` SRV resolution
+  for `link-ice`. Operators configure `stun:example.com` and ICE
+  reaches into `gn.dns` to expand the SRV record.
+* **Legacy `goodnetd-dns` surface** — every node publishes records
+  (peer descriptors, service announcements, capability TXT records)
+  and other nodes subscribe + resolve them through the same wire
+  surface a real DNS resolver speaks.
 
-- `MemoryDnsBackend` — hash-map, TTL, prefix sweep, since-timestamp
-  filter. Production builds use it for short-lived nodes whose
-  records are rebuilt on restart.
-- `SqliteDnsBackend` — file-backed reference with seven prepared
-  statements cached on the connection. WAL journal, `synchronous=
-  NORMAL`, `busy_timeout=5000`. Gated by `GOODNET_DNS_WITH_SQLITE`
-  (default ON).
-- `DnsHandler` — wire dispatcher for the seven `DNS_*` msg_ids
-  (0x0600..0x0606 under `protocol_id = "gnet-v1"`). Subscribe-and-
-  notify on PUT + DELETE, both per-conn (wire) and per-callback
-  (in-process).
-- `gn.dns` extension vtable for in-process callers
-  (`sdk/extensions/dns.h`).
-- 38 unit tests across the backend semantics, the extension
-  surface, and the wire dispatcher.
+Storage is delegated to `gn.handler.store` over the host_api
+extension boundary; this plugin owns only the DNS-typed schema
+layer and resolver/server logic.
 
-## Planned
+## Roadmap
 
-- DHT backend (Kademlia over GoodNet itself) — every node holds
-  a slice of the global namespace.
-- Redis backend — clustered, hot failover.
-- `gdns` CLI helper for ad-hoc lookups + bulk import / export.
-- Manifest config knob `dns.backend` (memory|sqlite) +
-  `dns.db_path` so backend selection is a manifest concern.
+| Slice | Subject | Status |
+|---|---|---|
+| D-DNS.1 | Cleanup: drop duplicate KV backends | _this commit_ |
+| D-DNS.2 | Store consumer via `host_api->query_extension("gn.store")` | pending |
+| D-DNS.3 | Typed records: A / AAAA / SRV / TXT / PTR / CNAME / MX | pending |
+| D-DNS.4 | Resolver cascade (local → cache → c-ares upstream) | pending |
+| D-DNS.5 | `link-ice` integration — closes plan §C.1 | pending |
+| D-DNS.6 | RFC 1035 UDP listener — full nameserver mode | pending |
+
+The plugin compiles and registers after every slice; only the
+surfaces specified by later slices are absent until they land.
 
 ## Relation to `gn.handler.store`
 
-`handler-store` is the same code lineage shipped as a different
-plugin name — a generic key-value store with no DNS-specific
-semantics. The two trees were forked at slice 2 (commit `79ec8b3`
-in `handler-store.git`). Going forward they diverge by intent:
+`store` is the generic KV primitive (sqlite + memory backends,
+prefix queries, subscribe-and-notify). `dns` is the DNS-specific
+service layered on top: it queries `store` through the extension
+ABI rather than carrying its own backend code. An operator who
+loads `dns` must also load `store` first — load order is enforced
+through the plugin manifest's `requires` slot once manifest-v2
+ships; until then the kernel's load-by-filename order suffices.
 
-* `store` keeps the generic surface — applications that want a
-  cluster-wide KV with prefix queries and pub/sub use the `store`
-  plugin and read records with their own semantics.
-* `dns` adds DNS-specific evolution — typed record schemas
-  (A / AAAA / SRV / TXT-style entries), peer-pubkey aware lookup,
-  service announcements, and (later) DHT replication keyed on a
-  Kademlia ID space.
-
-Operators choose either, both, or neither at manifest time. Wire
-ids `0x0600..0x0606` belong to whichever the operator loads
-first; loading both into the same kernel needs the second one's
-manifest to remap its msg_ids (planned).
+The two share an msg-id neighbourhood — `store` keeps the legacy
+`0x0600..0x0606` range, `dns` lives at `0x0610..0x0616`.
 
 ## Wire format
 
-Full byte-layout tables live in
-[`docs/contracts/dns.md`](../../../docs/contracts/dns.en.md).
-TL;DR: big-endian length-prefixed binary, 256-byte key cap, 64 KiB
-value cap, 256 records per query.
+Once D-DNS.3 lands, byte-layout tables for every envelope will live
+in
+[`docs/contracts/dns.md`](../../../docs/contracts/dns.en.md) in
+the kernel monorepo. TL;DR: big-endian length-prefixed binary,
+RFC-1035 name encoding for record bodies.
+
+## Not to be confused with
+
+* `sdk/cpp/dns.hpp` (the SDK hostname-resolver helper —
+  pure-function `tcp://example.com:443` → IP literal rewrite at
+  connect time). See
+  [`docs/contracts/hostname-resolver.md`](../../../docs/contracts/hostname-resolver.en.md).
 
 ## Building standalone
 
@@ -79,6 +70,3 @@ cmake .. -DCMAKE_PREFIX_PATH=$GOODNET_INSTALL_DIR
 cmake --build . -j
 ctest
 ```
-
-The CMakeLists auto-falls back to `find_package(GoodNet REQUIRED)`
-when invoked outside the kernel monorepo.

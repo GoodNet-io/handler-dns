@@ -16,16 +16,8 @@ gtest_discover_tests(test_dns
     DISCOVERY_TIMEOUT 30
     PROPERTIES TIMEOUT 60)
 
-if(GOODNET_DNS_WITH_SQLITE)
-    add_executable(test_dns_sqlite_backend test_dns_sqlite_backend.cpp)
-    target_link_libraries(test_dns_sqlite_backend PRIVATE
-        GoodNet::sdk
-        goodnet_dns_objects
-        spdlog::spdlog
-        GTest::gtest
-        GTest::gtest_main)
-    target_compile_features(test_dns_sqlite_backend PRIVATE cxx_std_23)
-    gtest_discover_tests(test_dns_sqlite_backend
-        DISCOVERY_TIMEOUT 30
-        PROPERTIES TIMEOUT 60)
-endif()
+## Per-slice test executables land here:
+##   D-DNS.2 — test_dns_store_client.cpp
+##   D-DNS.3 — test_dns_records.cpp
+##   D-DNS.4 — test_dns_resolver.cpp
+##   D-DNS.6 — test_dns_wire.cpp + test_dns_server.cpp
