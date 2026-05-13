@@ -27,11 +27,14 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 
+#include "dns_resolver.hpp"
 #include "store_client.hpp"
 
+#include <sdk/extensions/dns.h>
 #include <sdk/handler.h>
 #include <sdk/host_api.h>
 #include <sdk/types.h>
@@ -69,6 +72,11 @@ public:
     static constexpr std::uint32_t  msg_id()      noexcept { return kMsgResolve; }
     static constexpr std::uint8_t   priority()    noexcept { return 200; }
 
+    /// Extension surface metadata read by `GN_HANDLER_PLUGIN` to
+    /// publish the `gn.dns` vtable through `host_api->register_extension`.
+    static constexpr const char*    extension_name()    noexcept { return GN_EXT_DNS; }
+    static constexpr std::uint32_t  extension_version() noexcept { return GN_EXT_DNS_VERSION; }
+
     /// Wire dispatch entry point. D-DNS.1 returns CONTINUE for
     /// every msg_id; subsequent slices fill in the cases.
     [[nodiscard]] gn_propagation_t handle_message(const gn_message_t* env);
@@ -87,9 +95,35 @@ public:
         return store_ ? &*store_ : nullptr;
     }
 
+    /// Access to the typed resolver. Always non-null after
+    /// construction — the cascade still works as a passthrough
+    /// when neither store nor upstream is available (it just
+    /// returns empty for everything).
+    [[nodiscard]] Resolver& resolver() noexcept { return resolver_; }
+
+    /// Pointer to the published extension vtable. Reads by the
+    /// macro-generated `gn_plugin_register` entry point.
+    [[nodiscard]] const gn_dns_api_t* extension_vtable() const noexcept {
+        return &ext_vtable_;
+    }
+
 private:
-    const host_api_t*           api_;
-    std::optional<StoreClient>  store_;
+    /// Extension thunks bridging the C ABI to the Resolver.
+    static int  ext_resolve(void* ctx, const char* name, size_t name_len,
+                             std::uint16_t type, std::uint32_t max_results,
+                             gn_dns_emit_cb_t emit, void* emit_user);
+    static int  ext_put_record(void* ctx, const char* name, size_t name_len,
+                                std::uint16_t type,
+                                const std::uint8_t* rdata, size_t rdata_len,
+                                std::uint32_t ttl_s, std::uint8_t flags);
+    static int  ext_delete_record(void* ctx, const char* name, size_t name_len,
+                                   std::uint16_t type);
+
+    const host_api_t*               api_;
+    std::optional<StoreClient>      store_;
+    std::unique_ptr<IUpstreamResolver> upstream_;  ///< nullptr if no c-ares
+    Resolver                        resolver_;
+    gn_dns_api_t                    ext_vtable_{};
 };
 
 }  // namespace gn::handler::dns
