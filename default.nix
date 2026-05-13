@@ -1,0 +1,34 @@
+# Standalone Nix derivation for the goodnet-handler-dns plugin.
+# Pulls the kernel SDK + AddPlugin.cmake helper through `goodnet-core`'s
+# `propagatedBuildInputs` (asio / libsodium / openssl / spdlog / fmt /
+# nlohmann_json). Build artefacts: `lib<goodnet_handler_dns>.so`
+# + plugin manifest line.
+{ stdenv
+, cmake
+, ninja
+, pkg-config
+, gtest
+, rapidcheck
+, sqlite
+, goodnet-core
+, lib
+}:
+
+stdenv.mkDerivation {
+  pname   = "goodnet-handler-dns";
+  version = "1.0.0-rc1";
+  src     = ./.;
+  nativeBuildInputs = [ cmake ninja pkg-config ];
+  buildInputs       = [ goodnet-core gtest rapidcheck sqlite ];
+  cmakeFlags = [
+    "-DCMAKE_BUILD_TYPE=Release"
+    "-DBUILD_TESTING=OFF"
+  ];
+  doCheck = false;
+
+  meta = {
+    description = "GoodNet plugin: goodnet-handler-dns";
+    license = lib.licenses.gpl2Only;  # GPL-2.0 with Linking Exception (see LICENSE)
+    platforms = lib.platforms.linux;
+  };
+}
