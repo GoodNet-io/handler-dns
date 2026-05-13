@@ -3,7 +3,14 @@
 
 namespace gn::handler::dns {
 
-DnsHandler::DnsHandler(const host_api_t* api) : api_(api) {}
+DnsHandler::DnsHandler(const host_api_t* api)
+    : api_(api),
+      store_(StoreClient::query(api)) {
+    /// Store resolution is best-effort — a deployment that ships
+    /// only handler-dns (no handler-store) still loads. The resolver
+    /// cascade (D-DNS.4) walks `store_->get(...)` as one tier and
+    /// falls through to upstream when `store_` is empty.
+}
 
 DnsHandler::~DnsHandler() = default;
 

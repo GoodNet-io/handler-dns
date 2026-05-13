@@ -27,7 +27,10 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <span>
+
+#include "store_client.hpp"
 
 #include <sdk/handler.h>
 #include <sdk/host_api.h>
@@ -73,8 +76,20 @@ public:
         return handle_message(&env);
     }
 
+    /// True when `gn.store` was reachable at construction.
+    /// Diagnostics + tests rely on this; resolver paths (D-DNS.4)
+    /// degrade to upstream-only when store is absent.
+    [[nodiscard]] bool has_store() const noexcept { return store_.has_value(); }
+
+    /// Access to the store proxy. Returns nullptr when `gn.store`
+    /// is not registered.
+    [[nodiscard]] const StoreClient* store() const noexcept {
+        return store_ ? &*store_ : nullptr;
+    }
+
 private:
-    const host_api_t* api_;
+    const host_api_t*           api_;
+    std::optional<StoreClient>  store_;
 };
 
 }  // namespace gn::handler::dns

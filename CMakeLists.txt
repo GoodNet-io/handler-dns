@@ -24,11 +24,12 @@ if(NOT TARGET GoodNet::sdk)
     endif()
 endif()
 
-## Source list grows slice by slice — D-DNS.1 ships only the
-## skeleton (dns.cpp), D-DNS.2 adds store_client.cpp, D-DNS.3 adds
-## dns_records.cpp, D-DNS.4 adds dns_resolver.cpp (+ c-ares dep),
-## D-DNS.6 adds dns_wire.cpp + dns_server.cpp.
-set(GOODNET_DNS_SOURCES dns.cpp)
+## Source list grows slice by slice — D-DNS.2 adds store_client.cpp,
+## D-DNS.3 adds dns_records.cpp, D-DNS.4 adds dns_resolver.cpp (+
+## c-ares dep), D-DNS.6 adds dns_wire.cpp + dns_server.cpp.
+set(GOODNET_DNS_SOURCES
+    dns.cpp
+    store_client.cpp)
 
 add_library(goodnet_dns_objects OBJECT ${GOODNET_DNS_SOURCES})
 target_link_libraries(goodnet_dns_objects PUBLIC GoodNet::sdk)
