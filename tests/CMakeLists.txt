@@ -28,7 +28,18 @@ gtest_discover_tests(test_dns_store_client
     DISCOVERY_TIMEOUT 30
     PROPERTIES TIMEOUT 60)
 
+add_executable(test_dns_records test_dns_records.cpp)
+target_link_libraries(test_dns_records PRIVATE
+    GoodNet::sdk
+    goodnet_dns_objects
+    spdlog::spdlog
+    GTest::gtest
+    GTest::gtest_main)
+target_compile_features(test_dns_records PRIVATE cxx_std_23)
+gtest_discover_tests(test_dns_records
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES TIMEOUT 60)
+
 ## Per-slice test executables land here:
-##   D-DNS.3 — test_dns_records.cpp
 ##   D-DNS.4 — test_dns_resolver.cpp
 ##   D-DNS.6 — test_dns_wire.cpp + test_dns_server.cpp
