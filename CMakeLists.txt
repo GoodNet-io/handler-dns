@@ -24,15 +24,38 @@ if(NOT TARGET GoodNet::sdk)
     endif()
 endif()
 
-## Source list grows slice by slice — D-DNS.4 adds dns_resolver.cpp
-## (+ c-ares dep), D-DNS.6 adds dns_wire.cpp + dns_server.cpp.
+## Source list grows slice by slice — D-DNS.6 adds dns_wire.cpp +
+## dns_server.cpp.
 set(GOODNET_DNS_SOURCES
     dns.cpp
     store_client.cpp
-    dns_records.cpp)
+    dns_records.cpp
+    dns_resolver.cpp)
+
+## c-ares dependency. The resolver cascade's upstream tier uses
+## ares_query + ares_process for native SRV/TXT/PTR support that
+## asio's getaddrinfo-based resolver cannot offer. A deployment
+## that wants local-store-only resolution can flip
+## `GOODNET_DNS_WITH_UPSTREAM=OFF`; the plugin then ships only the
+## mock-friendly interface and returns nullopt for any name the
+## store doesn't already carry.
+option(GOODNET_DNS_WITH_UPSTREAM
+    "Build the c-ares upstream resolver alongside the cascade" ON)
+if(GOODNET_DNS_WITH_UPSTREAM)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(CARES REQUIRED libcares)
+endif()
 
 add_library(goodnet_dns_objects OBJECT ${GOODNET_DNS_SOURCES})
 target_link_libraries(goodnet_dns_objects PUBLIC GoodNet::sdk)
+if(GOODNET_DNS_WITH_UPSTREAM)
+    target_compile_definitions(goodnet_dns_objects PUBLIC
+        GOODNET_DNS_WITH_UPSTREAM=1)
+    target_include_directories(goodnet_dns_objects PUBLIC
+        ${CARES_INCLUDE_DIRS})
+    target_link_libraries(goodnet_dns_objects PUBLIC
+        ${CARES_LIBRARIES})
+endif()
 target_compile_features(goodnet_dns_objects PUBLIC cxx_std_23)
 target_compile_options(goodnet_dns_objects PRIVATE
     -Wall -Wextra -Wpedantic -Wno-unused-parameter)
