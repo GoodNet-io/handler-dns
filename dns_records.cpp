@@ -75,8 +75,9 @@ decode_name(std::span<const std::uint8_t> src) {
         const std::uint8_t len_byte = src[cursor++];
         /// Top 2 bits set ⇒ compression pointer. Disallowed in
         /// rdata blobs stored by this plugin per the §header
-        /// comment; let the message-layer decoder handle pointers
-        /// in D-DNS.6 with full message context.
+        /// comment; the future message-layer decoder for a UDP
+        /// nameserver listener handles pointers with full message
+        /// context.
         if ((len_byte & 0xC0) != 0) return std::nullopt;
         if (len_byte == 0) {
             /// Root terminator — stop. We DO NOT append a trailing

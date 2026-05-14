@@ -469,8 +469,9 @@ AresUpstreamResolver::resolve(std::string_view name, RrType type) {
     case RrType::CNAME:
         /// c-ares lacks a direct CNAME parser — CNAMEs surface in
         /// A/AAAA answer chains. For CNAME-direct queries the
-        /// upstream returns nothing in this slice; D-DNS.6 may
-        /// add raw-message parsing for it.
+        /// upstream returns nothing; raw-message parsing for that
+        /// path is a planned follow-up alongside the UDP nameserver
+        /// listener.
         return {};
     }
     return {};

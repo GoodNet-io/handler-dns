@@ -2,10 +2,10 @@
 /// @file   plugins/handlers/dns/dns.hpp
 /// @brief  DNS handler — real DNS service that uses gn.handler.store
 ///         for its record backing. The plugin owns the DNS-typed
-///         schema layer, the upstream resolver cascade, and (in
-///         D-DNS.6) a UDP server-side listener. Storage primitives
-///         live in the store plugin and reach us through the
-///         `gn.store` extension.
+///         schema layer and the upstream resolver cascade. A UDP
+///         server-side listener (full nameserver mode) is a planned
+///         follow-up. Storage primitives live in the store plugin
+///         and reach us through the `gn.store` extension.
 ///
 /// Wire surface (`protocol_id = "gnet-v1"`, msg_id allocation):
 ///
@@ -18,11 +18,10 @@
 ///   * 0x0616  DNS_SYNC         — symmetric: replicate the typed namespace
 ///
 /// The wire layout for each envelope is published in
-/// `docs/contracts/dns.md`. Slice D-DNS.1 wires only the handler
-/// vtable + the on-wire scaffold so the kernel can register us;
-/// real semantics arrive in D-DNS.2 (store consumer) through D-DNS.4
-/// (resolver). The plugin compiles after this slice but every
-/// `handle_message` returns `GN_PROPAGATION_CONTINUE` (no-op).
+/// `docs/contracts/dns.md`. Local callers reach the resolver through
+/// the `gn.dns` extension vtable (`resolve` / `put_record` /
+/// `delete_record`); the wire envelopes above stay reserved for the
+/// remote-dispatch path once a consumer needs it.
 
 #pragma once
 
@@ -56,9 +55,10 @@ inline constexpr std::uint32_t kMsgSync        = 0x0616;
 /// Stable protocol-id this handler binds to.
 inline constexpr const char* kProtocolId = "gnet-v1";
 
-/// DNS handler — slice D-DNS.1 ships only the scaffold. Real
-/// dispatch arrives in later slices (store consumer / resolver
-/// cascade / server-side).
+/// DNS handler — registers with the kernel, owns the store proxy,
+/// the upstream resolver, and the typed cascade. Local callers
+/// drive it through the published `gn.dns` extension vtable; the
+/// wire-dispatch path is reserved for future remote consumers.
 class DnsHandler {
 public:
     explicit DnsHandler(const host_api_t* api);
@@ -77,16 +77,18 @@ public:
     static constexpr const char*    extension_name()    noexcept { return GN_EXT_DNS; }
     static constexpr std::uint32_t  extension_version() noexcept { return GN_EXT_DNS_VERSION; }
 
-    /// Wire dispatch entry point. D-DNS.1 returns CONTINUE for
-    /// every msg_id; subsequent slices fill in the cases.
+    /// Wire dispatch entry point. Currently returns CONTINUE for
+    /// every msg_id — remote envelopes are reserved (see file
+    /// header) and the local `gn.dns` extension vtable carries all
+    /// in-process traffic.
     [[nodiscard]] gn_propagation_t handle_message(const gn_message_t* env);
     [[nodiscard]] gn_propagation_t handle_message(const gn_message_t& env) {
         return handle_message(&env);
     }
 
     /// True when `gn.store` was reachable at construction.
-    /// Diagnostics + tests rely on this; resolver paths (D-DNS.4)
-    /// degrade to upstream-only when store is absent.
+    /// Diagnostics + tests rely on this; the resolver cascade
+    /// degrades to upstream-only when the store is absent.
     [[nodiscard]] bool has_store() const noexcept { return store_.has_value(); }
 
     /// Access to the store proxy. Returns nullptr when `gn.store`

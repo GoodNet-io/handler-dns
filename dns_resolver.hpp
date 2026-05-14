@@ -44,8 +44,7 @@ struct ResolvedRecord {
 };
 
 /// Wall-clock injection point. Tests script time; production binds
-/// to `monotonic_default_clock_us` from dns.hpp's clock layer
-/// (added in D-DNS.4 alongside this header).
+/// to `default_clock_us` defined in `dns_resolver.cpp`.
 using ClockNowUs = std::uint64_t (*)() noexcept;
 
 /// Wall-clock reading microseconds from `std::chrono::system_clock`

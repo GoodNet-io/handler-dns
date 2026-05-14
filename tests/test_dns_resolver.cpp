@@ -3,8 +3,9 @@
 /// @brief  Resolver cascade — store hit / miss / TTL-expiry / cache-
 ///         back / no-upstream paths via a scripted MockUpstreamResolver.
 ///         AresUpstreamResolver is not exercised here (it talks to
-///         a real DNS infrastructure); CI integration coverage lands
-///         alongside D-DNS.5 when link-ice drives it end-to-end.
+///         real DNS infrastructure); end-to-end CI integration
+///         coverage runs through `link-ice` once that consumer
+///         drives the cascade in production.
 
 #include <gtest/gtest.h>
 

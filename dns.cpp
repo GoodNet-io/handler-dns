@@ -41,12 +41,12 @@ DnsHandler::DnsHandler(const host_api_t* api)
 DnsHandler::~DnsHandler() = default;
 
 gn_propagation_t DnsHandler::handle_message(const gn_message_t* env) {
-    /// Wire-side dispatch (DNS_RESOLVE / DNS_PUT_RECORD / ...) lands
-    /// alongside the SDK ABI extension once D-DNS.5 has consumers
-    /// over the wire. The extension vtable above already exposes
-    /// `resolve` / `put_record` / `delete_record` to local callers
-    /// — link-ice's gn.dns query path uses that and does not
-    /// require the wire envelopes.
+    /// Wire-side dispatch (DNS_RESOLVE / DNS_PUT_RECORD / ...) is
+    /// not wired yet — local callers reach the resolver through the
+    /// `gn.dns` extension vtable above (`resolve` / `put_record` /
+    /// `delete_record`), which is what `link-ice`'s SRV expansion
+    /// uses. The wire envelopes get filled in once a remote consumer
+    /// needs them.
     (void)env;
     return GN_PROPAGATION_CONTINUE;
 }

@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /// @file   plugins/handlers/dns/tests/test_dns.cpp
-/// @brief  Skeleton tests after D-DNS.1 cleanup. Real semantics
-///         (store consumer, resolver cascade, server-side) land in
-///         D-DNS.2 through D-DNS.6 with their own test TUs.
+/// @brief  Skeleton tests covering construction + the no-op
+///         wire-dispatch path. Real wire-side semantics belong to
+///         a future remote-envelope consumer; the store consumer,
+///         resolver cascade, and typed RR codec have their own
+///         dedicated test TUs.
 
 #include <gtest/gtest.h>
 
@@ -26,8 +28,8 @@ TEST(DnsHandler_Skeleton, ConstructsAndDestructs) {
     auto api = make_stub_api(host);
     DnsHandler h(&api);
     /// The plugin compiles, registers, and tears down cleanly.
-    /// Wire-level semantics are validated by per-slice tests
-    /// landing in D-DNS.2 onward.
+    /// Store-proxy, resolver-cascade, and RR-codec semantics are
+    /// validated by the dedicated test TUs in this directory.
     SUCCEED();
 }
 
@@ -36,9 +38,10 @@ TEST(DnsHandler_Skeleton, HandleMessageReturnsContinueForNow) {
     auto api = make_stub_api(host);
     DnsHandler h(&api);
 
-    /// D-DNS.1 stub returns CONTINUE for every envelope so the
-    /// dispatch chain isn't accidentally consumed before the real
-    /// handler code lands.
+    /// The wire-dispatch path returns CONTINUE for every envelope
+    /// so the dispatch chain isn't accidentally consumed — local
+    /// callers reach the resolver through the `gn.dns` extension
+    /// vtable instead.
     gn_message_t env{};
     env.msg_id = kMsgResolve;
     EXPECT_EQ(h.handle_message(&env), GN_PROPAGATION_CONTINUE);

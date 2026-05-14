@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /// @file   plugins/handlers/dns/store_client.hpp
-/// @brief  Thin proxy over the `gn.store` extension. Slice D-DNS.2
-///         lets handler-dns delegate KV storage to the store plugin
-///         instead of carrying its own backend code.
+/// @brief  Thin proxy over the `gn.store` extension. handler-dns
+///         delegates KV storage to the store plugin through this
+///         proxy instead of carrying its own backend code.
 ///
 /// Pattern mirrors `sdk/cpp/link_carrier.hpp:58-75` — query the
 /// host_api for a versioned extension, hold the returned vtable

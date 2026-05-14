@@ -4,18 +4,16 @@
 ///         the `<type>/<name>` store-key shape that lets one
 ///         gn.store namespace multiplex every RR type.
 ///
-/// Slice D-DNS.3 introduces the in-plugin typed layer. The SDK
-/// extension ABI keeps its KV-style shape until D-DNS.4 rewrites
-/// `sdk/extensions/dns.h` around the resolver cascade; in the
-/// meantime callers reach the typed codecs through the C++ symbols
-/// here.
+/// The in-plugin typed layer is the entry point for callers; the
+/// SDK extension ABI carries a KV-style shape around the resolver
+/// cascade and the C++ symbols here back the typed codecs directly.
 ///
 /// Name encoding follows RFC 1035 §3.1 *without* compression
 /// (RFC 1035 §4.1.4 pointers only appear inside DNS messages — a
 /// pointer in stored rdata would dangle once the surrounding
-/// message is gone). Compression is reintroduced in D-DNS.6 inside
-/// the `dns_wire.{hpp,cpp}` message codec, scoped to a single
-/// message buffer.
+/// message is gone). When the full-message codec (`dns_wire.
+/// {hpp,cpp}`) for a UDP nameserver listener lands, compression
+/// will live there, scoped to a single message buffer.
 
 #pragma once
 
@@ -170,7 +168,7 @@ parse_txt(std::span<const std::uint8_t> rdata);
 [[nodiscard]] std::optional<std::pair<RrType, std::string>>
 parse_store_key(std::string_view key);
 
-/// Validate that `n` denotes one of the RR types this slice
+/// Validate that `n` denotes one of the RR types the plugin
 /// understands. Useful when decoding a key from an unknown peer.
 [[nodiscard]] bool is_known_rrtype(std::uint16_t n) noexcept;
 

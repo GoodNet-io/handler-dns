@@ -24,8 +24,8 @@ if(NOT TARGET GoodNet::sdk)
     endif()
 endif()
 
-## Source list grows slice by slice — D-DNS.6 adds dns_wire.cpp +
-## dns_server.cpp.
+## Active source list. A future UDP nameserver listener will add
+## dns_wire.cpp + dns_server.cpp here.
 set(GOODNET_DNS_SOURCES
     dns.cpp
     store_client.cpp

@@ -52,6 +52,6 @@ gtest_discover_tests(test_dns_resolver
     DISCOVERY_TIMEOUT 30
     PROPERTIES TIMEOUT 60)
 
-## Per-slice test executables land here:
-##   D-DNS.6 — test_dns_wire.cpp + test_dns_server.cpp
-##   D-DNS.7 — test_dns_mdns.cpp
+## Future test executables land here:
+##   UDP nameserver listener — test_dns_wire.cpp + test_dns_server.cpp
+##   mDNS / DNS-SD multicast layer — test_dns_mdns.cpp

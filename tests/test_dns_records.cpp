@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /// @file   plugins/handlers/dns/tests/test_dns_records.cpp
 /// @brief  Round-trip + edge-case coverage for typed DNS RR codecs.
-///         D-DNS.3 pins the wire bytes per type so subsequent
-///         slices (resolver cascade, server-side) can build on a
-///         stable serialisation contract.
+///         Pins the wire bytes per type so the resolver cascade
+///         and any future server-side layer build on a stable
+///         serialisation contract.
 
 #include <gtest/gtest.h>
 

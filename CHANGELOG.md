@@ -9,14 +9,15 @@ versions track the kernel ABI through `gn_handler_vtable_t` /
 
 Plugin shipped as a real DNS service over the `gn.handler.store`
 primitive — the `015c287` checkpoint shape (a renamed fork of
-handler-store) is no longer the head of `main`. Four slices land
-the production scope; the fifth (link-ice integration) lives in
-`link-ice.git` and closes the master plan's §C.1.
+handler-store) is no longer the head of `main`. The published
+surface is enough for `link-ice` to expand `_stun._udp.<host>` SRV
+records through the `gn.dns` extension; that integration lives in
+`link-ice.git`.
 
 ### Added
 
-- **Typed RR layer** (D-DNS.3 — commit `24aed35`): A / AAAA / SRV /
-  TXT / PTR / CNAME / NS / MX encoders and parsers in
+- **Typed RR layer** (commit `24aed35`): A / AAAA / SRV / TXT /
+  PTR / CNAME / NS / MX encoders and parsers in
   `dns_records.{hpp,cpp}`. RR-type numeric values match the IANA
   DNS-parameters registry. RFC 1035 §3.1 name codec without
   compression (pointers belong inside DNS messages, not stand-
@@ -26,24 +27,29 @@ the production scope; the fifth (link-ice integration) lives in
   `gn.handler.store` namespace multiplexes every RR type. Two-byte
   prefix leaves headroom for future IANA allocations.
 
-- **Resolver cascade** (D-DNS.4 — commit `2c141f6`): three-tier
-  walk in `dns_resolver.{hpp,cpp}`. Tier 1 = store / cache (honours
+- **Resolver cascade** (commit `2c141f6`): three-tier walk in
+  `dns_resolver.{hpp,cpp}`. Tier 1 = store / cache (honours
   per-record TTL; `ttl_s == 0` marks an operator-curated permanent
   record). Tier 2 = upstream via c-ares (full RR-type support; 3 s
   query timeout × 2 retries; 5 s overall wall). Tier 3 = cache-back
   using the response's own TTL.
 
-- **`gn.store` consumer** (D-DNS.2 — commit `ad78aea`): thin
-  `StoreClient` proxy over `host_api->query_extension_checked
-  ("gn.store", GN_EXT_STORE_VERSION, ...)`. Pattern mirrors
+- **`gn.store` consumer** (commit `ad78aea`): thin `StoreClient`
+  proxy over `host_api->query_extension_checked("gn.store",
+  GN_EXT_STORE_VERSION, ...)`. Pattern mirrors
   `sdk/cpp/link_carrier.hpp`. Graceful degradation when the store
   plugin isn't loaded.
 
 - **`IUpstreamResolver` injection point** — tests script answers
   via `MockUpstreamResolver`; production binds
   `AresUpstreamResolver`. The interface lets a future deployment
-  swap c-ares for stub / hosts-file / DoT / DoH without touching
-  the cascade.
+  swap c-ares for a stub / hosts-file / DoT / DoH client without
+  touching the cascade.
+
+- **`gn.dns` extension surface** — `resolve` / `put_record` /
+  `delete_record` published through `host_api->register_extension`.
+  Local callers (notably `link-ice`) reach the resolver through
+  this vtable.
 
 - **`GOODNET_DNS_WITH_UPSTREAM` CMake option** (default ON) gates
   the c-ares dependency. Air-gapped deployments can build the
@@ -59,26 +65,19 @@ the production scope; the fifth (link-ice integration) lives in
 ### Removed
 
 - `sqlite_backend.{hpp,cpp}` + `MemoryDnsBackend` + `IDnsBackend`
-  (D-DNS.1 — commit `5404ca9`). KV storage moved to the store
-  plugin; reaching it through extension query instead.
+  (commit `5404ca9`). KV storage moved to the store plugin;
+  reaching it through extension query instead.
 - `GOODNET_DNS_WITH_SQLITE` CMake option — sqlite is no longer a
   direct dep.
 - `tests/test_dns_sqlite_backend.cpp` — the backend test matrix
   belongs under the store plugin.
 
-### Pending (separate scope)
-
-- **link-ice integration** (D-DNS.5) lives in `link-ice.git`,
-  consumes the `gn.dns` extension to expand `stun:<hostname>`
-  configs via SRV. Closes master-plan §C.1.
-
 ### Explicitly out of scope
 
-- **DNS server-side daemon** (RFC 1035 UDP listener) — that's a
-  standalone application in the spirit of legacy `goodnetd-dns`,
-  not a handler-plugin feature. Lives in a future
-  `apps/goodnet-dnsd/` or its own git when an operator flags
-  the work.
+- **DNS server-side daemon** (RFC 1035 UDP listener) — a planned
+  follow-up; will live as a standalone application in the spirit
+  of legacy `goodnetd-dns`, or as a server-listener add-on inside
+  this plugin, when an operator flags the work.
 - **mDNS / DNS-SD multicast layer** — same standalone-app
   destination.
 - DNSSEC — within the cluster we trust ourselves; upstream is

@@ -3,9 +3,9 @@
 /// @brief  Plugin entry collapsed to `GN_HANDLER_PLUGIN`. The macro
 ///         generates the five `gn_plugin_*` C entry points and builds
 ///         the handler vtable from `DnsHandler`'s static metadata.
-///         Slice D-DNS.1 ships only the handler registration; the
-///         `gn.dns` extension surface (resolve / put_record / etc.)
-///         lands in D-DNS.4 once the resolver cascade exists.
+///         Registration covers both the handler vtable and the
+///         `gn.dns` extension surface (resolve / put_record /
+///         delete_record) backed by the resolver cascade.
 
 #include <sdk/cpp/handler_plugin.hpp>
 

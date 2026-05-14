@@ -2,37 +2,46 @@
 
 Real DNS service for a GoodNet cluster. Typed RR storage on top of
 `gn.handler.store`, three-tier resolver cascade (local store → cache
-→ upstream via c-ares), and an optional RFC 1035 UDP server-side
-listener so the plugin can act as a nameserver for a cluster's
-authoritative zone.
-
-This plugin is the answer to two distinct asks at once:
-
-* **C.1 from the master plan** — `_stun._udp.<host>` SRV resolution
-  for `link-ice`. Operators configure `stun:example.com` and ICE
-  reaches into `gn.dns` to expand the SRV record.
-* **Legacy `goodnetd-dns` surface** — every node publishes records
-  (peer descriptors, service announcements, capability TXT records)
-  and other nodes subscribe + resolve them through the same wire
-  surface a real DNS resolver speaks.
+→ upstream via c-ares), and a published `gn.dns` extension surface
+so in-process callers (notably `link-ice` for SRV expansion of
+`stun:<host>` configs) reach the cascade without round-tripping
+through the wire.
 
 Storage is delegated to `gn.handler.store` over the host_api
 extension boundary; this plugin owns only the DNS-typed schema
-layer and resolver/server logic.
+layer and resolver logic.
 
-## Roadmap
+## What ships
 
-| Slice | Subject | Status |
-|---|---|---|
-| D-DNS.1 | Cleanup: drop duplicate KV backends | _this commit_ |
-| D-DNS.2 | Store consumer via `host_api->query_extension("gn.store")` | pending |
-| D-DNS.3 | Typed records: A / AAAA / SRV / TXT / PTR / CNAME / MX | pending |
-| D-DNS.4 | Resolver cascade (local → cache → c-ares upstream) | pending |
-| D-DNS.5 | `link-ice` integration — closes plan §C.1 | pending |
-| D-DNS.6 | RFC 1035 UDP listener — full nameserver mode | pending |
-
-The plugin compiles and registers after every slice; only the
-surfaces specified by later slices are absent until they land.
+* **Typed RR layer** — A / AAAA / SRV / TXT / PTR / CNAME / NS / MX
+  encoders and parsers in `dns_records.{hpp,cpp}`. RR-type numeric
+  values match the IANA DNS-parameters registry. RFC 1035 §3.1
+  name codec without compression (pointers belong inside DNS
+  messages, not stand-alone rdata).
+* **Store-key shape** `<u16 type-byte BE>/<name>` — one
+  `gn.handler.store` namespace multiplexes every RR type. Two-byte
+  prefix leaves headroom for future IANA allocations.
+* **Resolver cascade** in `dns_resolver.{hpp,cpp}`. Tier 1 = store /
+  cache (honours per-record TTL; `ttl_s == 0` marks an
+  operator-curated permanent record). Tier 2 = upstream via c-ares
+  (full RR-type support; 3 s query timeout × 2 retries; 5 s overall
+  wall). Tier 3 = cache-back using the response's own TTL.
+* **`gn.store` consumer** — thin `StoreClient` proxy over
+  `host_api->query_extension_checked("gn.store",
+  GN_EXT_STORE_VERSION, ...)`. Pattern mirrors
+  `sdk/cpp/link_carrier.hpp`. Graceful degradation when the store
+  plugin isn't loaded.
+* **`IUpstreamResolver` injection point** — tests script answers
+  via `MockUpstreamResolver`; production binds
+  `AresUpstreamResolver`. The interface lets a future deployment
+  swap c-ares for a stub / hosts-file / DoT / DoH client without
+  touching the cascade.
+* **`gn.dns` extension surface** — `resolve` / `put_record` /
+  `delete_record` slots backed by the resolver. `link-ice` uses
+  this for `_stun._udp.<host>` SRV expansion.
+* **`GOODNET_DNS_WITH_UPSTREAM` CMake option** (default ON) gates
+  the c-ares dependency. Air-gapped deployments can build the
+  store-only flavour with no upstream tier.
 
 ## Relation to `gn.handler.store`
 
@@ -49,11 +58,12 @@ The two share an msg-id neighbourhood — `store` keeps the legacy
 
 ## Wire format
 
-Once D-DNS.3 lands, byte-layout tables for every envelope will live
-in
-[`docs/contracts/dns.md`](../../../docs/contracts/dns.en.md) in
-the kernel monorepo. TL;DR: big-endian length-prefixed binary,
-RFC-1035 name encoding for record bodies.
+Byte-layout tables for every envelope live in
+[`docs/contracts/dns.md`](../../../docs/contracts/dns.en.md) in the
+kernel monorepo. TL;DR: big-endian length-prefixed binary, RFC-1035
+name encoding for record bodies. Local callers use the `gn.dns`
+extension vtable directly; the wire envelopes are reserved for
+remote-dispatch consumers.
 
 ## Not to be confused with
 
@@ -61,6 +71,21 @@ RFC-1035 name encoding for record bodies.
   pure-function `tcp://example.com:443` → IP literal rewrite at
   connect time). See
   [`docs/contracts/hostname-resolver.md`](../../../docs/contracts/hostname-resolver.en.md).
+
+## Roadmap
+
+* **UDP RFC 1035 server listener** — full nameserver mode for a
+  cluster's authoritative zone. Adds `dns_wire.{hpp,cpp}` (full
+  message codec with in-message compression) and
+  `dns_server.{hpp,cpp}` (UDP bind + dispatch).
+* **mDNS / DNS-SD multicast layer** — local-link discovery.
+* **CNAME-direct upstream path** — c-ares lacks a direct CNAME
+  parser; raw-message parsing alongside the UDP server work covers
+  it.
+
+Explicitly out of scope: DNSSEC validation (we trust ourselves
+within the cluster; upstream stays plain c-ares for now) and any
+DHT-backed store backend (that belongs in `gn.handler.store`).
 
 ## Building standalone
 

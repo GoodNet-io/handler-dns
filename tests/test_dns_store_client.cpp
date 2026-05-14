@@ -4,10 +4,10 @@
 ///         `gn.store` extension to confirm round-trip semantics and
 ///         graceful degradation when the extension is absent.
 ///
-/// D-DNS.2: handler-dns delegates all KV work to gn.handler.store
-/// through the host_api extension boundary. The stub here mimics
-/// what handler-store would publish; later slices (D-DNS.4 resolver
-/// cascade) feed records through this same proxy.
+/// handler-dns delegates all KV work to gn.handler.store through
+/// the host_api extension boundary. The stub here mimics what
+/// handler-store would publish; the resolver cascade feeds records
+/// through this same proxy.
 
 #include <gtest/gtest.h>
 
