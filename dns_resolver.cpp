@@ -75,6 +75,16 @@ Resolver::resolve(std::string_view name, RrType type,
     /// always within any non-zero cap. The future multi-record
     /// redesign will need to enforce `max_results` at the lookup
     /// site too.
+    ///
+    /// Records hit at tier 1 are treated as trusted under the
+    /// current single-tier scheme: they were written by a
+    /// downstream that the operator already vetted (typically the
+    /// kernel itself or a peer the operator pinned). The mesh-side
+    /// signed-upstream contract — Ed25519 over `(name, type, ttl,
+    /// rdata)` so an arbitrary peer cannot poison the cache — is
+    /// the follow-up that lands alongside the DNS wire-dispatch
+    /// build-out. Until then `Resolver::resolve` returns whatever
+    /// the store hands back unconditionally.
     if (auto cached = lookup_store(name, type)) {
         return {std::move(*cached)};
     }
