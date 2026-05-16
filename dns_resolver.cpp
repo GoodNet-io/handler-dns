@@ -69,8 +69,12 @@ Resolver::lookup_store(std::string_view name, RrType type) const {
 
 std::vector<ResolvedRecord>
 Resolver::resolve(std::string_view name, RrType type,
-                  std::uint32_t /*max_results*/) {
-    /// Tier 1 — store / cache.
+                  std::uint32_t max_results) {
+    /// Tier 1 — store / cache. The current store-key shape yields
+    /// at most one record per (type, name), so the single hit is
+    /// always within any non-zero cap. The future multi-record
+    /// redesign will need to enforce `max_results` at the lookup
+    /// site too.
     if (auto cached = lookup_store(name, type)) {
         return {std::move(*cached)};
     }
@@ -82,8 +86,16 @@ Resolver::resolve(std::string_view name, RrType type,
     auto fresh = upstream_->resolve(name, type);
     if (fresh.empty()) return {};
 
-    /// Tier 3 — cache-back. Write every record back into the
-    /// store so the next lookup hits tier 1. Permanent
+    /// Apply the caller-supplied cap. `0` means "no cap" per
+    /// `dns_resolver.hpp` §1 — every record stays. A non-zero
+    /// value trims the tail so the wire dispatch never returns
+    /// more rows than the requester asked for.
+    if (max_results != 0 && fresh.size() > max_results) {
+        fresh.resize(max_results);
+    }
+
+    /// Tier 3 — cache-back. Write every (capped) record back into
+    /// the store so the next lookup hits tier 1. Permanent
     /// (ttl_s == 0) responses never get auto-evicted; we don't
     /// override that interpretation.
     if (store_ != nullptr) {
