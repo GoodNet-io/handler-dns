@@ -70,12 +70,13 @@ taxonomy. Both routes share the same backend through the
 internal Resolver so local + remote callers stay coherent on
 the stored bytes.
 
-DNS_GET currently supports exact-match mode only; prefix and
-since modes ack `kStatusBadSize` until the resolver surface
-grows them. DNS_SUBSCRIBE accepts exact + prefix; subscribers
-receive DNS_NOTIFY whenever a wire-side PUT/DELETE matches
-their key, and the conn-state DISCONNECTED channel prunes
-subscribers that vanish without an explicit teardown.
+DNS_GET supports all three modes — exact (through the typed
+Resolver) and prefix + since (direct store walks with the
+TXT-prefixed key, decoded results filtered to TXT). DNS_SUBSCRIBE
+accepts exact + prefix; subscribers receive DNS_NOTIFY whenever
+a wire-side PUT/DELETE matches their key, and the conn-state
+DISCONNECTED channel prunes subscribers that vanish without an
+explicit teardown.
 
 ## Not to be confused with
 
