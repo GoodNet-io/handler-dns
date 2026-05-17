@@ -37,6 +37,10 @@ constexpr std::uint8_t kStatusBackendError = 3;
 /// DNS_PUT header layout per §3.1: req(8) + ttl(8) + flags(1) +
 /// reserved(1) + key_len(2) + value_len(4) = 24 bytes.
 constexpr std::size_t kHeaderPut = 24;
+/// DNS_GET header layout per §3.2: req(8) + mode(1) + reserved(1)
+/// + max_results(2) + reserved(4) + since_us(8) + key_len(2) +
+/// reserved(2) = 28 bytes.
+constexpr std::size_t kHeaderGet = 28;
 
 /// Parsed view of a DNS_PUT envelope payload. The key + value
 /// spans borrow from the wire bytes — caller copies before any
@@ -48,6 +52,38 @@ struct PutView {
     std::string_view         key;
     std::span<const std::uint8_t> value;
 };
+
+struct GetView {
+    std::uint64_t   request_id;
+    std::uint8_t    mode;
+    std::uint16_t   max_results;
+    std::uint64_t   since_us;
+    std::string_view key;
+};
+
+[[nodiscard]] std::optional<GetView>
+parse_get(std::span<const std::uint8_t> payload) {
+    if (payload.size() < kHeaderGet) return std::nullopt;
+    GetView v{};
+    v.request_id  = gn::endian::read_be<std::uint64_t>(
+        {payload.data() + 0, 8});
+    v.mode        = payload[8];
+    // payload[9] reserved
+    v.max_results = gn::endian::read_be<std::uint16_t>(
+        {payload.data() + 10, 2});
+    // payload[12..16] reserved
+    v.since_us    = gn::endian::read_be<std::uint64_t>(
+        {payload.data() + 16, 8});
+    const auto key_len = gn::endian::read_be<std::uint16_t>(
+        {payload.data() + 24, 2});
+    // payload[26..28] reserved
+    if (kHeaderGet + key_len != payload.size()) return std::nullopt;
+    if (key_len > 256) return std::nullopt;
+    v.key = std::string_view(
+        reinterpret_cast<const char*>(payload.data() + kHeaderGet),
+        key_len);
+    return v;
+}
 
 [[nodiscard]] std::optional<PutView>
 parse_put(std::span<const std::uint8_t> payload) {
@@ -91,6 +127,49 @@ encode_result_ack(std::uint64_t request_id, std::uint8_t status) {
     return out;
 }
 
+/// Encode a DNS_RESULT with N records per §3.3 + §3.6.
+[[nodiscard]] std::vector<std::uint8_t>
+encode_result_records(std::uint64_t request_id, std::uint8_t status,
+                       const std::vector<ResolvedRecord>& records) {
+    /// Pre-compute total size to avoid mid-build reallocation.
+    std::size_t total = 12;  // header
+    for (const auto& r : records) {
+        total += 24 + r.name.size() + r.rdata.size();
+    }
+    std::vector<std::uint8_t> out(total, 0);
+    gn::endian::write_be<std::uint64_t>(
+        {out.data() + 0, 8}, request_id);
+    out[8] = status;
+    // out[9] reserved zero
+    gn::endian::write_be<std::uint16_t>(
+        {out.data() + 10, 2}, static_cast<std::uint16_t>(records.size()));
+
+    std::size_t off = 12;
+    for (const auto& r : records) {
+        /// Record layout §3.6: timestamp(8) + ttl(8) + flags(1) +
+        /// reserved(1) + key_len(2) + value_len(4) + key + value.
+        gn::endian::write_be<std::uint64_t>(
+            {out.data() + off + 0, 8}, r.timestamp_us);
+        gn::endian::write_be<std::uint64_t>(
+            {out.data() + off + 8, 8},
+            static_cast<std::uint64_t>(r.ttl_s));
+        out[off + 16] = 0;  // flags — wire records carry no flag bits
+        out[off + 17] = 0;  // reserved
+        gn::endian::write_be<std::uint16_t>(
+            {out.data() + off + 18, 2},
+            static_cast<std::uint16_t>(r.name.size()));
+        gn::endian::write_be<std::uint32_t>(
+            {out.data() + off + 20, 4},
+            static_cast<std::uint32_t>(r.rdata.size()));
+        std::memcpy(out.data() + off + 24,
+                    r.name.data(), r.name.size());
+        std::memcpy(out.data() + off + 24 + r.name.size(),
+                    r.rdata.data(), r.rdata.size());
+        off += 24 + r.name.size() + r.rdata.size();
+    }
+    return out;
+}
+
 }  // namespace
 
 DnsHandler::DnsHandler(const host_api_t* api)
@@ -122,6 +201,36 @@ gn_propagation_t DnsHandler::handle_message(const gn_message_t* env) {
     const gn_conn_id_t sender = env->conn_id;
 
     switch (env->msg_id) {
+    case kMsgGet: {
+        /// Exact mode is the only one wired today. Prefix and
+        /// since modes require backend operations the Resolver
+        /// does not expose yet — they ack with kStatusBadSize as
+        /// a documented placeholder until the resolver grows the
+        /// surface.
+        const auto v = parse_get(payload);
+        if (!v) {
+            const auto resp = encode_result_ack(0, kStatusBadSize);
+            (void)reply(sender, resp);
+            return GN_PROPAGATION_CONSUMED;
+        }
+        if (v->mode != 0) {  // only exact-mode supported
+            const auto resp = encode_result_ack(
+                v->request_id, kStatusBadSize);
+            (void)reply(sender, resp);
+            return GN_PROPAGATION_CONSUMED;
+        }
+        auto records = resolver_.resolve(
+            v->key, RrType::TXT,
+            v->max_results == 0 ? 1u
+                                : static_cast<std::uint32_t>(v->max_results));
+        const auto status = records.empty()
+            ? kStatusNotFound : kStatusOk;
+        const auto resp = encode_result_records(
+            v->request_id, status, records);
+        (void)reply(sender, resp);
+        return GN_PROPAGATION_CONSUMED;
+    }
+
     case kMsgPut: {
         /// The wire `value` is opaque bytes per the contract
         /// (§3.1). Internally we route the write through the

@@ -135,6 +135,82 @@ TEST(DnsWire, PutEnvelopeWithoutStoreAcksBackendError) {
               42u);
 }
 
+std::vector<std::uint8_t> make_get_payload(std::uint64_t request_id,
+                                              std::uint8_t mode,
+                                              std::uint16_t max_results,
+                                              std::uint64_t since_us,
+                                              std::string_view key) {
+    std::vector<std::uint8_t> out(28 + key.size());
+    gn::endian::write_be<std::uint64_t>({out.data() + 0, 8}, request_id);
+    out[8] = mode;
+    // out[9] reserved
+    gn::endian::write_be<std::uint16_t>(
+        {out.data() + 10, 2}, max_results);
+    // out[12..16] reserved
+    gn::endian::write_be<std::uint64_t>(
+        {out.data() + 16, 8}, since_us);
+    gn::endian::write_be<std::uint16_t>(
+        {out.data() + 24, 2}, static_cast<std::uint16_t>(key.size()));
+    // out[26..28] reserved
+    std::memcpy(out.data() + 28, key.data(), key.size());
+    return out;
+}
+
+TEST(DnsWire, GetEnvelopeBadSizeAcks) {
+    StubHost host;
+    auto api = make_stub_api(host);
+    DnsHandler h(&api);
+
+    const std::vector<std::uint8_t> truncated{0x00, 0x00};
+    auto env = make_env(kMsgGet, /*conn*/ 9, truncated);
+    EXPECT_EQ(h.handle_message(&env), GN_PROPAGATION_CONSUMED);
+
+    std::lock_guard lk(host.mu);
+    ASSERT_EQ(host.send_calls.load(), 1);
+    EXPECT_EQ(host.sent_msg_ids[0], kMsgResult);
+    EXPECT_EQ(host.sent_payloads[0][8], 1u);  // kStatusBadSize
+}
+
+TEST(DnsWire, GetEnvelopePrefixModeUnsupportedAcksBadSize) {
+    StubHost host;
+    auto api = make_stub_api(host);
+    DnsHandler h(&api);
+
+    const auto payload = make_get_payload(
+        /*req*/ 11, /*mode*/ 1 /*prefix*/, /*max*/ 5,
+        /*since*/ 0, "p/");
+    auto env = make_env(kMsgGet, /*conn*/ 9, payload);
+    EXPECT_EQ(h.handle_message(&env), GN_PROPAGATION_CONSUMED);
+
+    std::lock_guard lk(host.mu);
+    ASSERT_EQ(host.send_calls.load(), 1);
+    EXPECT_EQ(host.sent_payloads[0][8], 1u);  // kStatusBadSize for now
+    EXPECT_EQ(gn::endian::read_be<std::uint64_t>(
+                  {host.sent_payloads[0].data() + 0, 8}),
+              11u);
+}
+
+TEST(DnsWire, GetEnvelopeNotFoundWithEmptyResolver) {
+    StubHost host;
+    auto api = make_stub_api(host);
+    DnsHandler h(&api);
+
+    const auto payload = make_get_payload(
+        /*req*/ 99, /*mode*/ 0 /*exact*/, /*max*/ 1,
+        /*since*/ 0, "absent");
+    auto env = make_env(kMsgGet, /*conn*/ 9, payload);
+    EXPECT_EQ(h.handle_message(&env), GN_PROPAGATION_CONSUMED);
+
+    std::lock_guard lk(host.mu);
+    ASSERT_EQ(host.send_calls.load(), 1);
+    EXPECT_EQ(host.sent_msg_ids[0], kMsgResult);
+    EXPECT_EQ(host.sent_payloads[0][8], 2u);  // kStatusNotFound
+    /// record_count at offset 10..12 must be zero on not-found.
+    EXPECT_EQ(gn::endian::read_be<std::uint16_t>(
+                  {host.sent_payloads[0].data() + 10, 2}),
+              0u);
+}
+
 TEST(DnsWire, PutEnvelopeBadSizeAcksWithBadSize) {
     StubHost host;
     auto api = make_stub_api(host);
