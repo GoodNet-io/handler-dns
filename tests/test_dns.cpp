@@ -167,6 +167,54 @@ std::vector<std::uint8_t> make_delete_payload(std::uint64_t request_id,
     return out;
 }
 
+std::vector<std::uint8_t> make_subscribe_payload(std::uint64_t request_id,
+                                                    std::uint8_t mode,
+                                                    std::string_view key) {
+    std::vector<std::uint8_t> out(16 + key.size());
+    gn::endian::write_be<std::uint64_t>({out.data() + 0, 8}, request_id);
+    out[8] = mode;
+    // out[9] reserved
+    gn::endian::write_be<std::uint16_t>(
+        {out.data() + 10, 2}, static_cast<std::uint16_t>(key.size()));
+    // out[12..16] reserved
+    std::memcpy(out.data() + 16, key.data(), key.size());
+    return out;
+}
+
+TEST(DnsWire, SubscribeAcksAndRecordsSubscriber) {
+    StubHost host;
+    auto api = make_stub_api(host);
+    DnsHandler h(&api);
+    EXPECT_EQ(h.subscription_count(), 0u);
+
+    const auto sub = make_subscribe_payload(
+        /*req*/ 7, /*mode*/ 0 /*exact*/, "k");
+    auto env = make_env(kMsgSubscribe, /*conn*/ 11, sub);
+    EXPECT_EQ(h.handle_message(&env), GN_PROPAGATION_CONSUMED);
+
+    EXPECT_EQ(h.subscription_count(), 1u);
+    std::lock_guard lk(host.mu);
+    ASSERT_EQ(host.send_calls.load(), 1);
+    EXPECT_EQ(host.sent_msg_ids[0], kMsgResult);
+    EXPECT_EQ(host.sent_payloads[0][8], 0u);  // kStatusOk
+}
+
+TEST(DnsWire, SubscribeRejectsSinceMode) {
+    StubHost host;
+    auto api = make_stub_api(host);
+    DnsHandler h(&api);
+
+    /// Mode 2 (since) is invalid for SUBSCRIBE per §3.5.
+    const auto sub = make_subscribe_payload(/*req*/ 1, /*mode*/ 2, "k");
+    auto env = make_env(kMsgSubscribe, /*conn*/ 11, sub);
+    EXPECT_EQ(h.handle_message(&env), GN_PROPAGATION_CONSUMED);
+    EXPECT_EQ(h.subscription_count(), 0u);
+
+    std::lock_guard lk(host.mu);
+    ASSERT_EQ(host.send_calls.load(), 1);
+    EXPECT_EQ(host.sent_payloads[0][8], 1u);  // kStatusBadSize
+}
+
 TEST(DnsWire, DeleteEnvelopeBadSizeAcks) {
     StubHost host;
     auto api = make_stub_api(host);

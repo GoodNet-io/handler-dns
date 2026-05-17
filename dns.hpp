@@ -34,10 +34,14 @@
 #include "dns_resolver.hpp"
 #include "store_client.hpp"
 
+#include <sdk/conn_events.h>
 #include <sdk/extensions/dns.h>
 #include <sdk/handler.h>
 #include <sdk/host_api.h>
 #include <sdk/types.h>
+
+#include <mutex>
+#include <vector>
 
 namespace gn::handler::dns {
 
@@ -110,6 +114,10 @@ public:
         return &ext_vtable_;
     }
 
+    /// Test hook: number of wire-side subscribers currently
+    /// recorded. In-process callers do not appear in this count.
+    [[nodiscard]] std::size_t subscription_count() const noexcept;
+
 private:
     /// Frame a DNS_RESULT envelope and hand it to the kernel for
     /// dispatch back to the sender of the originating request.
@@ -130,11 +138,45 @@ private:
     static int  ext_delete_record(void* ctx, const char* name, size_t name_len,
                                    std::uint16_t type);
 
+    /// Wire-side subscription record. Each entry tracks one peer
+    /// who issued DNS_SUBSCRIBE and is waiting for DNS_NOTIFY on
+    /// matching keys. `mode == 0` (exact) matches by full key
+    /// equality; `mode == 1` (prefix) matches keys that start
+    /// with the recorded prefix. `request_id` is echoed in the
+    /// initial DNS_RESULT ack but is not embedded in subsequent
+    /// notifications — the contract scope is per-event, not
+    /// per-original-request.
+    struct WireSubscriber {
+        gn_conn_id_t  conn;
+        std::uint8_t  mode;
+        std::string   key;
+    };
+
+    /// Notify every subscriber whose mode + key matches @p name
+    /// with a DNS_NOTIFY envelope carrying the given event +
+    /// record snapshot.
+    void notify_wire_subscribers(std::string_view name,
+                                  std::span<const std::uint8_t> rdata,
+                                  std::uint64_t ttl_s,
+                                  std::uint8_t flags,
+                                  std::uint64_t timestamp_us,
+                                  std::uint8_t event);
+
     const host_api_t*               api_;
     std::optional<StoreClient>      store_;
     std::unique_ptr<IUpstreamResolver> upstream_;  ///< nullptr if no c-ares
     Resolver                        resolver_;
     gn_dns_api_t                    ext_vtable_{};
+
+    mutable std::mutex              sub_mu_;
+    std::vector<WireSubscriber>     wire_subs_;
+
+    /// Subscription handle returned by `host_api->subscribe_conn_state`
+    /// at construction. The callback drops any wire subscriber whose
+    /// `conn_id` matches a `DISCONNECTED` event so subscribers
+    /// that vanish without an explicit teardown do not pile up. The
+    /// destructor releases this through `host_api->unsubscribe`.
+    gn_subscription_id_t            conn_state_sub_{0};
 };
 
 }  // namespace gn::handler::dns

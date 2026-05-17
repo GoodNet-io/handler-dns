@@ -5,6 +5,7 @@
 
 #include <sdk/cpp/endian.hpp>
 
+#include <chrono>
 #include <cstring>
 #include <optional>
 #include <span>
@@ -56,6 +57,72 @@ struct PutView {
 /// DNS_DELETE header layout per §3.4: req(8) + key_len(2) +
 /// reserved(6) = 16 bytes.
 constexpr std::size_t kHeaderDelete = 16;
+/// DNS_SUBSCRIBE header layout per §3.5: req(8) + mode(1) +
+/// reserved(1) + key_len(2) + reserved(4) = 16 bytes.
+constexpr std::size_t kHeaderSubscribe = 16;
+
+/// DNS_NOTIFY event kinds per §3.7.
+constexpr std::uint8_t kEventPut    = 0;
+constexpr std::uint8_t kEventDelete = 1;
+
+struct SubscribeView {
+    std::uint64_t    request_id;
+    std::uint8_t     mode;
+    std::string_view key;
+};
+
+[[nodiscard]] std::optional<SubscribeView>
+parse_subscribe(std::span<const std::uint8_t> payload) {
+    if (payload.size() < kHeaderSubscribe) return std::nullopt;
+    SubscribeView v{};
+    v.request_id = gn::endian::read_be<std::uint64_t>(
+        {payload.data() + 0, 8});
+    v.mode = payload[8];
+    if (v.mode > 1) return std::nullopt;  // since-mode disallowed for sub
+    // payload[9] reserved
+    const auto key_len = gn::endian::read_be<std::uint16_t>(
+        {payload.data() + 10, 2});
+    // payload[12..16] reserved
+    if (kHeaderSubscribe + key_len != payload.size()) return std::nullopt;
+    if (key_len > 256) return std::nullopt;
+    v.key = std::string_view(
+        reinterpret_cast<const char*>(payload.data() + kHeaderSubscribe),
+        key_len);
+    return v;
+}
+
+/// Encode a DNS_NOTIFY envelope per §3.7: timestamp(8) + event(1)
+/// + reserved(1) + Record per §3.6.
+[[nodiscard]] std::vector<std::uint8_t>
+encode_notify(std::uint64_t timestamp_us, std::uint8_t event,
+               std::string_view name,
+               std::span<const std::uint8_t> rdata,
+               std::uint64_t ttl_s, std::uint8_t flags) {
+    const std::size_t record_size = 24 + name.size() + rdata.size();
+    std::vector<std::uint8_t> out(10 + record_size, 0);
+    gn::endian::write_be<std::uint64_t>(
+        {out.data() + 0, 8}, timestamp_us);
+    out[8] = event;
+    // out[9] reserved
+    /// Record §3.6.
+    std::size_t r = 10;
+    gn::endian::write_be<std::uint64_t>(
+        {out.data() + r + 0, 8}, timestamp_us);
+    gn::endian::write_be<std::uint64_t>(
+        {out.data() + r + 8, 8}, ttl_s);
+    out[r + 16] = flags;
+    // out[r + 17] reserved
+    gn::endian::write_be<std::uint16_t>(
+        {out.data() + r + 18, 2},
+        static_cast<std::uint16_t>(name.size()));
+    gn::endian::write_be<std::uint32_t>(
+        {out.data() + r + 20, 4},
+        static_cast<std::uint32_t>(rdata.size()));
+    std::memcpy(out.data() + r + 24, name.data(), name.size());
+    std::memcpy(out.data() + r + 24 + name.size(),
+                rdata.data(), rdata.size());
+    return out;
+}
 
 struct DeleteView {
     std::uint64_t    request_id;
@@ -213,9 +280,44 @@ DnsHandler::DnsHandler(const host_api_t* api)
     ext_vtable_.put_record    = &DnsHandler::ext_put_record;
     ext_vtable_.delete_record = &DnsHandler::ext_delete_record;
     ext_vtable_.ctx           = this;
+
+    /// Prune wire-side subscribers whose owning connection
+    /// disconnects without sending an explicit unsubscribe. The
+    /// kernel publishes DISCONNECTED on the conn-state channel;
+    /// the callback walks `wire_subs_` and drops every entry
+    /// whose `conn` matches. Without this, dropped peers leak
+    /// rows forever.
+    if (api_ != nullptr && api_->subscribe_conn_state != nullptr) {
+        const auto rc = api_->subscribe_conn_state(
+            api_->host_ctx,
+            [](void* user, const gn_conn_event_t* ev) noexcept {
+                if (ev == nullptr ||
+                    ev->kind != GN_CONN_EVENT_DISCONNECTED) return;
+                auto* self = static_cast<DnsHandler*>(user);
+                std::lock_guard lk(self->sub_mu_);
+                std::erase_if(self->wire_subs_,
+                    [conn = ev->conn](const WireSubscriber& s) {
+                        return s.conn == conn;
+                    });
+            },
+            this,
+            /*ud_destroy*/ nullptr,
+            &conn_state_sub_);
+        if (rc != GN_OK) conn_state_sub_ = GN_INVALID_SUBSCRIPTION_ID;
+    }
 }
 
-DnsHandler::~DnsHandler() = default;
+DnsHandler::~DnsHandler() {
+    if (api_ != nullptr && api_->unsubscribe != nullptr &&
+        conn_state_sub_ != GN_INVALID_SUBSCRIPTION_ID) {
+        (void)api_->unsubscribe(api_->host_ctx, conn_state_sub_);
+    }
+}
+
+std::size_t DnsHandler::subscription_count() const noexcept {
+    std::lock_guard lk(sub_mu_);
+    return wire_subs_.size();
+}
 
 gn_propagation_t DnsHandler::handle_message(const gn_message_t* env) {
     if (env == nullptr || env->payload == nullptr) {
@@ -237,6 +339,29 @@ gn_propagation_t DnsHandler::handle_message(const gn_message_t* env) {
         const bool ok = resolver_.delete_record(v->key, RrType::TXT);
         const auto resp = encode_result_ack(
             v->request_id, ok ? kStatusOk : kStatusNotFound);
+        (void)reply(sender, resp);
+        if (ok) {
+            notify_wire_subscribers(v->key, {}, /*ttl*/ 0,
+                                     /*flags*/ 0,
+                                     /*timestamp*/ 0,
+                                     kEventDelete);
+        }
+        return GN_PROPAGATION_CONSUMED;
+    }
+
+    case kMsgSubscribe: {
+        const auto v = parse_subscribe(payload);
+        if (!v) {
+            const auto resp = encode_result_ack(0, kStatusBadSize);
+            (void)reply(sender, resp);
+            return GN_PROPAGATION_CONSUMED;
+        }
+        {
+            std::lock_guard lk(sub_mu_);
+            wire_subs_.push_back(WireSubscriber{
+                sender, v->mode, std::string{v->key}});
+        }
+        const auto resp = encode_result_ack(v->request_id, kStatusOk);
         (void)reply(sender, resp);
         return GN_PROPAGATION_CONSUMED;
     }
@@ -298,6 +423,21 @@ gn_propagation_t DnsHandler::handle_message(const gn_message_t* env) {
         const auto resp = encode_result_ack(
             v->request_id, ok ? kStatusOk : kStatusBackendError);
         (void)reply(sender, resp);
+        if (ok) {
+            /// The handler does not have a clock injection seam
+            /// yet, so the timestamp on the dispatched record is
+            /// best-effort (`steady_clock` µs since epoch is not
+            /// meaningful across nodes). Subscribers reading the
+            /// timestamp_us field should treat it as approximate.
+            const auto now = std::chrono::duration_cast<
+                std::chrono::microseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count();
+            notify_wire_subscribers(v->key, v->value, v->ttl_s,
+                                     v->flags,
+                                     static_cast<std::uint64_t>(now),
+                                     kEventPut);
+        }
         return GN_PROPAGATION_CONSUMED;
     }
 
@@ -315,6 +455,42 @@ gn_result_t DnsHandler::reply(gn_conn_id_t conn,
     }
     return api_->send(api_->host_ctx, conn, kMsgResult,
                        payload.data(), payload.size());
+}
+
+void DnsHandler::notify_wire_subscribers(
+    std::string_view name,
+    std::span<const std::uint8_t> rdata,
+    std::uint64_t ttl_s,
+    std::uint8_t flags,
+    std::uint64_t timestamp_us,
+    std::uint8_t event) {
+    if (api_ == nullptr || api_->send == nullptr) return;
+
+    /// Snapshot the matching subscribers under the lock, then
+    /// release the lock before dispatching sends — otherwise a
+    /// subscriber callback that re-enters the handler (e.g.
+    /// through synchronous send delivery in test fixtures)
+    /// deadlocks.
+    std::vector<gn_conn_id_t> targets;
+    {
+        std::lock_guard lk(sub_mu_);
+        for (const auto& s : wire_subs_) {
+            const bool match =
+                (s.mode == 0)
+                    ? (name == s.key)
+                    : (name.size() >= s.key.size() &&
+                       name.compare(0, s.key.size(), s.key) == 0);
+            if (match) targets.push_back(s.conn);
+        }
+    }
+    if (targets.empty()) return;
+
+    const auto wire = encode_notify(
+        timestamp_us, event, name, rdata, ttl_s, flags);
+    for (const auto conn : targets) {
+        (void)api_->send(api_->host_ctx, conn, kMsgNotify,
+                          wire.data(), wire.size());
+    }
 }
 
 // ── extension thunks ────────────────────────────────────────────────────────
