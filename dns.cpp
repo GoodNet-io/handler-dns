@@ -60,10 +60,82 @@ constexpr std::size_t kHeaderDelete = 16;
 /// DNS_SUBSCRIBE header layout per §3.5: req(8) + mode(1) +
 /// reserved(1) + key_len(2) + reserved(4) = 16 bytes.
 constexpr std::size_t kHeaderSubscribe = 16;
+/// DNS_SYNC header layout per §3.8: req(8) + since_us(8) +
+/// max_results(2) + record_count(2) = 20 bytes. The request
+/// carries record_count = 0; the reply appends N records.
+constexpr std::size_t kHeaderSync = 20;
 
 /// DNS_NOTIFY event kinds per §3.7.
 constexpr std::uint8_t kEventPut    = 0;
 constexpr std::uint8_t kEventDelete = 1;
+
+struct SyncView {
+    std::uint64_t request_id;
+    std::uint64_t since_us;
+    std::uint16_t max_results;
+};
+
+[[nodiscard]] std::optional<SyncView>
+parse_sync_request(std::span<const std::uint8_t> payload) {
+    if (payload.size() < kHeaderSync) return std::nullopt;
+    SyncView v{};
+    v.request_id  = gn::endian::read_be<std::uint64_t>(
+        {payload.data() + 0, 8});
+    v.since_us    = gn::endian::read_be<std::uint64_t>(
+        {payload.data() + 8, 8});
+    v.max_results = gn::endian::read_be<std::uint16_t>(
+        {payload.data() + 16, 2});
+    /// record_count at offset 18 must be 0 on a request.
+    const auto rec_count = gn::endian::read_be<std::uint16_t>(
+        {payload.data() + 18, 2});
+    if (rec_count != 0) return std::nullopt;
+    return v;
+}
+
+/// Encode a DNS_SYNC reply: shares the §3.8 header with the
+/// request and appends `record_count` records per §3.6.
+[[nodiscard]] std::vector<std::uint8_t>
+encode_sync_reply(std::uint64_t request_id, std::uint64_t since_us,
+                   std::uint16_t max_results,
+                   const std::vector<ResolvedRecord>& records) {
+    std::size_t total = kHeaderSync;
+    for (const auto& r : records) {
+        total += 24 + r.name.size() + r.rdata.size();
+    }
+    std::vector<std::uint8_t> out(total, 0);
+    gn::endian::write_be<std::uint64_t>(
+        {out.data() + 0, 8}, request_id);
+    gn::endian::write_be<std::uint64_t>(
+        {out.data() + 8, 8}, since_us);
+    gn::endian::write_be<std::uint16_t>(
+        {out.data() + 16, 2}, max_results);
+    gn::endian::write_be<std::uint16_t>(
+        {out.data() + 18, 2},
+        static_cast<std::uint16_t>(records.size()));
+
+    std::size_t off = kHeaderSync;
+    for (const auto& r : records) {
+        gn::endian::write_be<std::uint64_t>(
+            {out.data() + off + 0, 8}, r.timestamp_us);
+        gn::endian::write_be<std::uint64_t>(
+            {out.data() + off + 8, 8},
+            static_cast<std::uint64_t>(r.ttl_s));
+        out[off + 16] = 0;  // flags
+        out[off + 17] = 0;  // reserved
+        gn::endian::write_be<std::uint16_t>(
+            {out.data() + off + 18, 2},
+            static_cast<std::uint16_t>(r.name.size()));
+        gn::endian::write_be<std::uint32_t>(
+            {out.data() + off + 20, 4},
+            static_cast<std::uint32_t>(r.rdata.size()));
+        std::memcpy(out.data() + off + 24,
+                    r.name.data(), r.name.size());
+        std::memcpy(out.data() + off + 24 + r.name.size(),
+                    r.rdata.data(), r.rdata.size());
+        off += 24 + r.name.size() + r.rdata.size();
+    }
+    return out;
+}
 
 struct SubscribeView {
     std::uint64_t    request_id;
@@ -345,6 +417,45 @@ gn_propagation_t DnsHandler::handle_message(const gn_message_t* env) {
                                      /*flags*/ 0,
                                      /*timestamp*/ 0,
                                      kEventDelete);
+        }
+        return GN_PROPAGATION_CONSUMED;
+    }
+
+    case kMsgSync: {
+        const auto v = parse_sync_request(payload);
+        if (!v) {
+            const auto resp = encode_result_ack(0, kStatusBadSize);
+            (void)reply(sender, resp);
+            return GN_PROPAGATION_CONSUMED;
+        }
+        std::vector<ResolvedRecord> records;
+        if (store_.has_value()) {
+            const auto cap = v->max_results == 0 ? 256u
+                : static_cast<std::uint32_t>(v->max_results);
+            auto raw = store_->get_since(v->since_us, cap);
+            records.reserve(raw.size());
+            for (const auto& r : raw) {
+                /// Decode the type-prefixed store key back into
+                /// (RrType, name). Filter to TXT — that's what
+                /// the wire surface uses for DNS_PUT records.
+                if (auto pair = parse_store_key(r.key)) {
+                    if (pair->first != RrType::TXT) continue;
+                    ResolvedRecord rec;
+                    rec.name         = std::move(pair->second);
+                    rec.type         = pair->first;
+                    rec.rdata        = std::move(r.value);
+                    rec.ttl_s        = static_cast<std::uint32_t>(
+                        std::min<std::uint64_t>(r.ttl_s, 0xFFFFFFFFu));
+                    rec.timestamp_us = r.timestamp_us;
+                    records.push_back(std::move(rec));
+                }
+            }
+        }
+        const auto resp = encode_sync_reply(
+            v->request_id, v->since_us, v->max_results, records);
+        if (api_ != nullptr && api_->send != nullptr) {
+            (void)api_->send(api_->host_ctx, sender, kMsgSync,
+                              resp.data(), resp.size());
         }
         return GN_PROPAGATION_CONSUMED;
     }

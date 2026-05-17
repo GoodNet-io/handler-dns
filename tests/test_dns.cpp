@@ -199,6 +199,69 @@ TEST(DnsWire, SubscribeAcksAndRecordsSubscriber) {
     EXPECT_EQ(host.sent_payloads[0][8], 0u);  // kStatusOk
 }
 
+std::vector<std::uint8_t> make_sync_request(std::uint64_t request_id,
+                                               std::uint64_t since_us,
+                                               std::uint16_t max_results) {
+    std::vector<std::uint8_t> out(20);
+    gn::endian::write_be<std::uint64_t>({out.data() + 0, 8}, request_id);
+    gn::endian::write_be<std::uint64_t>({out.data() + 8, 8}, since_us);
+    gn::endian::write_be<std::uint16_t>(
+        {out.data() + 16, 2}, max_results);
+    /// record_count == 0 on a request.
+    gn::endian::write_be<std::uint16_t>({out.data() + 18, 2}, 0);
+    return out;
+}
+
+TEST(DnsWire, SyncRequestRepliesWithEmptyWindow) {
+    /// Without a store extension the handler still answers SYNC
+    /// with a well-formed reply carrying zero records. The
+    /// envelope echoes request_id / since_us / max_results so
+    /// the caller's correlation completes.
+    StubHost host;
+    auto api = make_stub_api(host);
+    DnsHandler h(&api);
+
+    const auto req = make_sync_request(/*req*/ 5, /*since*/ 1000,
+                                          /*max*/ 32);
+    auto env = make_env(kMsgSync, /*conn*/ 9, req);
+    EXPECT_EQ(h.handle_message(&env), GN_PROPAGATION_CONSUMED);
+
+    std::lock_guard lk(host.mu);
+    ASSERT_EQ(host.send_calls.load(), 1);
+    EXPECT_EQ(host.sent_msg_ids[0], kMsgSync);
+    const auto& reply = host.sent_payloads[0];
+    ASSERT_GE(reply.size(), 20u);
+    /// Echoed fields.
+    EXPECT_EQ(gn::endian::read_be<std::uint64_t>(
+                  {reply.data() + 0, 8}), 5u);
+    EXPECT_EQ(gn::endian::read_be<std::uint64_t>(
+                  {reply.data() + 8, 8}), 1000u);
+    EXPECT_EQ(gn::endian::read_be<std::uint16_t>(
+                  {reply.data() + 16, 2}), 32u);
+    /// Zero records.
+    EXPECT_EQ(gn::endian::read_be<std::uint16_t>(
+                  {reply.data() + 18, 2}), 0u);
+}
+
+TEST(DnsWire, SyncRequestRejectsNonZeroRecordCount) {
+    StubHost host;
+    auto api = make_stub_api(host);
+    DnsHandler h(&api);
+
+    auto req = make_sync_request(/*req*/ 1, 0, 0);
+    /// Set record_count to 1 — invalid on a request.
+    gn::endian::write_be<std::uint16_t>({req.data() + 18, 2}, 1);
+    auto env = make_env(kMsgSync, /*conn*/ 9, req);
+    EXPECT_EQ(h.handle_message(&env), GN_PROPAGATION_CONSUMED);
+
+    std::lock_guard lk(host.mu);
+    ASSERT_EQ(host.send_calls.load(), 1);
+    /// The handler returns DNS_RESULT with kStatusBadSize on
+    /// the malformed request — not DNS_SYNC.
+    EXPECT_EQ(host.sent_msg_ids[0], kMsgResult);
+    EXPECT_EQ(host.sent_payloads[0][8], 1u);  // kStatusBadSize
+}
+
 TEST(DnsWire, DeleteFiresNotifyToMatchingSubscribers) {
     StubHost host;
     auto api = make_stub_api(host);
