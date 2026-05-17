@@ -105,7 +105,7 @@ distinguish them.
   it.
 
 Explicitly out of scope: DNSSEC validation (we trust ourselves
-within the cluster; upstream stays plain c-ares for now) and any
+within the cluster; upstream stays plain c-ares) and any
 DHT-backed store backend (that belongs in `gn.handler.store`).
 
 ## Building standalone
