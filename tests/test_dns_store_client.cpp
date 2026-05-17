@@ -447,6 +447,58 @@ TEST(DnsExtensionCoherence, ExtensionPutTxtFiresWireNotify) {
     EXPECT_EQ(host.sent_payloads[0][8], 0u);
 }
 
+TEST(DnsExtensionCoherence, ExtensionDeleteTxtFiresWireNotify) {
+    /// Symmetric to ExtensionPutTxtFiresWireNotify: a TXT record
+    /// removed through the extension's delete_record must fan out
+    /// DNS_NOTIFY with kEventDelete to wire subscribers.
+    ExtensionHost host;
+    StubStore stub;
+    auto vt = stub.make_vtable();
+    host.extensions[GN_EXT_STORE] = {GN_EXT_STORE_VERSION, &vt};
+
+    auto api = make_api_with_store(host);
+    DnsHandler h(&api);
+    ASSERT_TRUE(h.has_store());
+
+    /// Seed a TXT record so the delete has something to remove.
+    const auto* api_vtable = h.extension_vtable();
+    ASSERT_NE(api_vtable, nullptr);
+    const std::vector<std::uint8_t> value{0xde, 0xad, 0xbe, 0xef};
+    ASSERT_EQ(api_vtable->put_record(
+                  api_vtable->ctx, "removable", 9,
+                  /*type TXT*/ static_cast<std::uint16_t>(16),
+                  value.data(), value.size(), 0, 0), 0);
+
+    /// Subscribe to the key.
+    auto sub_payload = std::vector<std::uint8_t>(16 + 9);
+    gn::endian::write_be<std::uint64_t>(
+        {sub_payload.data() + 0, 8}, 1ULL);
+    sub_payload[8] = 0;
+    gn::endian::write_be<std::uint16_t>(
+        {sub_payload.data() + 10, 2}, static_cast<std::uint16_t>(9));
+    std::memcpy(sub_payload.data() + 16, "removable", 9);
+    auto env_sub = make_wire_env(kMsgSubscribe, 50, sub_payload);
+    EXPECT_EQ(h.handle_message(&env_sub), GN_PROPAGATION_CONSUMED);
+    {
+        std::lock_guard lk(host.send_mu);
+        host.sent_payloads.clear();
+        host.sent_conns.clear();
+        host.sent_msg_ids.clear();
+    }
+
+    /// Extension delete fires DNS_NOTIFY to the subscriber.
+    EXPECT_EQ(api_vtable->delete_record(
+                  api_vtable->ctx, "removable", 9,
+                  /*type TXT*/ static_cast<std::uint16_t>(16)), 0);
+
+    std::lock_guard lk(host.send_mu);
+    ASSERT_EQ(host.sent_msg_ids.size(), 1u);
+    EXPECT_EQ(host.sent_msg_ids[0], kMsgNotify);
+    EXPECT_EQ(host.sent_conns[0], 50u);
+    /// Event byte = 1 / kEventDelete.
+    EXPECT_EQ(host.sent_payloads[0][8], 1u);
+}
+
 TEST(DnsExtensionCoherence, ExtensionPutNonTxtDoesNotFireWireNotify) {
     /// Non-TXT RR types stay extension-only — wire DNS_SUBSCRIBE
     /// carries no type field, so the wire surface implicitly
