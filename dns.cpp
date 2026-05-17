@@ -704,6 +704,23 @@ int DnsHandler::ext_put_record(void* ctx,
             ttl_s, flags)) {
         return -2;
     }
+    /// TXT writes also notify wire subscribers — the wire surface
+    /// uses TXT as its implicit type, so in-process writes to the
+    /// same type would otherwise sneak past notification (an
+    /// extension caller updates a record, wire subscribers stay
+    /// stale until the next wire-side PUT). Other RR types
+    /// remain extension-only — wire DNS_SUBSCRIBE has no concept
+    /// of type, so notifying about an AAAA write would be noise.
+    if (type == static_cast<std::uint16_t>(RrType::TXT)) {
+        const auto now = std::chrono::duration_cast<
+            std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count();
+        self->notify_wire_subscribers(
+            std::string_view{name, name_len},
+            std::span<const std::uint8_t>(rdata, rdata_len),
+            ttl_s, flags, static_cast<std::uint64_t>(now), kEventPut);
+    }
     return 0;
 }
 
@@ -713,9 +730,16 @@ int DnsHandler::ext_delete_record(void* ctx,
     if (ctx == nullptr || name == nullptr) return -2;
     if (!is_known_rrtype(type)) return -2;
     auto* self = static_cast<DnsHandler*>(ctx);
-    return self->resolver_.delete_record(
+    const bool ok = self->resolver_.delete_record(
         std::string_view{name, name_len},
-        static_cast<RrType>(type)) ? 0 : -1;
+        static_cast<RrType>(type));
+    if (ok && type == static_cast<std::uint16_t>(RrType::TXT)) {
+        self->notify_wire_subscribers(
+            std::string_view{name, name_len}, {},
+            /*ttl*/ 0, /*flags*/ 0,
+            /*timestamp*/ 0, kEventDelete);
+    }
+    return ok ? 0 : -1;
 }
 
 }  // namespace gn::handler::dns
