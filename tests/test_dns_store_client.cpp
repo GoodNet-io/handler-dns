@@ -392,6 +392,62 @@ gn_message_t make_wire_env(std::uint32_t msg_id, gn_conn_id_t conn,
 
 } // namespace
 
+TEST(DnsWire_StoreBacked, SyncReturnsRecordsAfterSinceTimestamp) {
+    ExtensionHost host;
+    StubStore stub;
+    auto vt = stub.make_vtable();
+    host.extensions[GN_EXT_STORE] = {GN_EXT_STORE_VERSION, &vt};
+
+    auto api = make_api_with_store(host);
+    DnsHandler h(&api);
+    ASSERT_TRUE(h.has_store());
+
+    /// Seed two records — both land in the store with monotonic
+    /// timestamps from StubStore's clock_us++ counter.
+    auto p1 = make_put_payload(1, 0, 0, "alpha",
+                                  std::vector<std::uint8_t>{0x01});
+    auto p2 = make_put_payload(2, 0, 0, "beta",
+                                  std::vector<std::uint8_t>{0x02});
+    {
+        auto e = make_wire_env(kMsgPut, 7, p1);
+        EXPECT_EQ(h.handle_message(&e), GN_PROPAGATION_CONSUMED);
+    }
+    {
+        auto e = make_wire_env(kMsgPut, 7, p2);
+        EXPECT_EQ(h.handle_message(&e), GN_PROPAGATION_CONSUMED);
+    }
+
+    /// Drop the PUT acks.
+    {
+        std::lock_guard lk(host.send_mu);
+        host.sent_payloads.clear();
+        host.sent_conns.clear();
+        host.sent_msg_ids.clear();
+    }
+
+    /// SYNC since 0 captures all TXT records — both seeded ones.
+    std::vector<std::uint8_t> sync_req(20);
+    gn::endian::write_be<std::uint64_t>(
+        {sync_req.data() + 0, 8}, /*req*/ 9ULL);
+    gn::endian::write_be<std::uint64_t>(
+        {sync_req.data() + 8, 8}, /*since*/ 0ULL);
+    gn::endian::write_be<std::uint16_t>(
+        {sync_req.data() + 16, 2}, /*max*/ 10);
+    gn::endian::write_be<std::uint16_t>(
+        {sync_req.data() + 18, 2}, /*count*/ 0);
+    auto env_sync = make_wire_env(kMsgSync, 9, sync_req);
+    EXPECT_EQ(h.handle_message(&env_sync), GN_PROPAGATION_CONSUMED);
+
+    std::lock_guard lk(host.send_mu);
+    ASSERT_EQ(host.sent_msg_ids.size(), 1u);
+    EXPECT_EQ(host.sent_msg_ids[0], kMsgSync);
+    const auto& reply = host.sent_payloads[0];
+    EXPECT_EQ(gn::endian::read_be<std::uint64_t>(
+                  {reply.data() + 0, 8}), 9u);
+    EXPECT_EQ(gn::endian::read_be<std::uint16_t>(
+                  {reply.data() + 18, 2}), 2u);
+}
+
 TEST(DnsWire_StoreBacked, DeleteFiresNotifyAfterPut) {
     /// Subscribe + PUT seeds a record. Then DELETE removes it,
     /// firing DNS_NOTIFY with event = 1 / kEventDelete to the
