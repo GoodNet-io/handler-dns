@@ -43,10 +43,10 @@ TEST(DnsHandler_Skeleton, HandleMessageReturnsContinueForNow) {
     /// callers reach the resolver through the `gn.dns` extension
     /// vtable instead.
     gn_message_t env{};
-    env.msg_id = kMsgResolve;
+    env.msg_id = kMsgPut;
     EXPECT_EQ(h.handle_message(&env), GN_PROPAGATION_CONTINUE);
 
-    env.msg_id = kMsgPutRecord;
+    env.msg_id = kMsgGet;
     EXPECT_EQ(h.handle_message(&env), GN_PROPAGATION_CONTINUE);
 
     env.msg_id = 0x9999;  // unknown

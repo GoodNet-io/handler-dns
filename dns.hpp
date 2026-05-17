@@ -7,15 +7,16 @@
 ///         follow-up. Storage primitives live in the store plugin
 ///         and reach us through the `gn.store` extension.
 ///
-/// Wire surface (`protocol_id = "gnet-v1"`, msg_id allocation):
+/// Wire surface (`protocol_id = "gnet-v1"`, msg_id allocation per
+/// `docs/contracts/dns.en.md` §2.2):
 ///
-///   * 0x0610  DNS_RESOLVE      — client → server: resolve (name, type)
-///   * 0x0611  DNS_PUT_RECORD   — client → server: install a typed record
-///   * 0x0612  DNS_RECORD_RESULT — server → client: response envelope
-///   * 0x0613  DNS_DELETE       — client → server: remove a typed record
-///   * 0x0614  DNS_SUBSCRIBE    — client → server: watch a name / prefix
-///   * 0x0615  DNS_NOTIFY       — server → subscriber: change event
-///   * 0x0616  DNS_SYNC         — symmetric: replicate the typed namespace
+///   * 0x0610  DNS_PUT       — client → server: install a record
+///   * 0x0611  DNS_GET       — client → server: resolve / query
+///   * 0x0612  DNS_RESULT    — server → client: response envelope
+///   * 0x0613  DNS_DELETE    — client → server: remove a record
+///   * 0x0614  DNS_SUBSCRIBE — client → server: watch a name / prefix
+///   * 0x0615  DNS_NOTIFY    — server → subscriber: change event
+///   * 0x0616  DNS_SYNC      — symmetric: replicate the namespace
 ///
 /// The wire layout for each envelope is published in
 /// `docs/contracts/dns.en.md`. Local callers reach the resolver through
@@ -44,13 +45,13 @@ namespace gn::handler::dns {
 /// `0x0610..0x0616` block sits next to the legacy `0x0600..0x0606`
 /// range that `gn.handler.store` keeps, so a node hosting both
 /// plugins routes traffic unambiguously by `msg_id`.
-inline constexpr std::uint32_t kMsgResolve     = 0x0610;
-inline constexpr std::uint32_t kMsgPutRecord   = 0x0611;
-inline constexpr std::uint32_t kMsgRecordResult = 0x0612;
-inline constexpr std::uint32_t kMsgDelete      = 0x0613;
-inline constexpr std::uint32_t kMsgSubscribe   = 0x0614;
-inline constexpr std::uint32_t kMsgNotify      = 0x0615;
-inline constexpr std::uint32_t kMsgSync        = 0x0616;
+inline constexpr std::uint32_t kMsgPut       = 0x0610;
+inline constexpr std::uint32_t kMsgGet       = 0x0611;
+inline constexpr std::uint32_t kMsgResult    = 0x0612;
+inline constexpr std::uint32_t kMsgDelete    = 0x0613;
+inline constexpr std::uint32_t kMsgSubscribe = 0x0614;
+inline constexpr std::uint32_t kMsgNotify    = 0x0615;
+inline constexpr std::uint32_t kMsgSync      = 0x0616;
 
 /// Stable protocol-id this handler binds to.
 inline constexpr const char* kProtocolId = "gnet-v1";
@@ -69,7 +70,7 @@ public:
 
     /// Static metadata read by `GN_HANDLER_PLUGIN`.
     static constexpr const char*    protocol_id() noexcept { return kProtocolId; }
-    static constexpr std::uint32_t  msg_id()      noexcept { return kMsgResolve; }
+    static constexpr std::uint32_t  msg_id()      noexcept { return kMsgPut; }
     static constexpr std::uint8_t   priority()    noexcept { return 200; }
 
     /// Extension surface metadata read by `GN_HANDLER_PLUGIN` to
