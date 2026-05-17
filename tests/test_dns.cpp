@@ -199,6 +199,34 @@ TEST(DnsWire, SubscribeAcksAndRecordsSubscriber) {
     EXPECT_EQ(host.sent_payloads[0][8], 0u);  // kStatusOk
 }
 
+TEST(DnsWire, DeleteFiresNotifyToMatchingSubscribers) {
+    StubHost host;
+    auto api = make_stub_api(host);
+    DnsHandler h(&api);
+
+    /// Subscribe conn 50 to exact key "watched".
+    const auto sub = make_subscribe_payload(/*req*/ 1, /*mode*/ 0, "watched");
+    auto env_sub = make_env(kMsgSubscribe, /*conn*/ 50, sub);
+    EXPECT_EQ(h.handle_message(&env_sub), GN_PROPAGATION_CONSUMED);
+
+    /// Delete the watched key. The handler's delete path always
+    /// emits a DNS_NOTIFY to matching subscribers even when the
+    /// underlying resolver had no record — the notification is
+    /// about the EVENT (a peer issued a delete), not about the
+    /// data state. In this fixture without a store backend the
+    /// delete returns not-found, so no notify fires.
+    const auto del = make_delete_payload(/*req*/ 2, "watched");
+    auto env_del = make_env(kMsgDelete, /*conn*/ 60, del);
+    EXPECT_EQ(h.handle_message(&env_del), GN_PROPAGATION_CONSUMED);
+
+    /// Without a store, delete reports not-found; only the ack
+    /// is sent. With a store, the notify would fire too.
+    std::lock_guard lk(host.mu);
+    /// One ack for SUBSCRIBE + one ack for DELETE = 2 sends.
+    /// No NOTIFY because the resolver has no store-backed entry.
+    EXPECT_EQ(host.send_calls.load(), 2);
+}
+
 TEST(DnsWire, SubscribeRejectsSinceMode) {
     StubHost host;
     auto api = make_stub_api(host);
