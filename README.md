@@ -78,6 +78,14 @@ a wire-side PUT/DELETE matches their key, and the conn-state
 DISCONNECTED channel prunes subscribers that vanish without an
 explicit teardown.
 
+Wire and extension surfaces share notification coherence on the
+TXT type: an in-process caller using the `gn.dns` extension's
+`put_record` / `delete_record` on a TXT record also fans out
+DNS_NOTIFY to matching wire subscribers, so local writes are
+visible to wire-level observers. Non-TXT RR types stay
+extension-only since the wire surface has no type field to
+distinguish them.
+
 ## Not to be confused with
 
 * `sdk/cpp/dns.hpp` (the SDK hostname-resolver helper —
