@@ -610,8 +610,10 @@ gn_propagation_t DnsHandler::handle_message(const gn_message_t* env) {
     }
 
     default:
-        /// Remaining envelopes (GET / RESULT / DELETE / SUBSCRIBE /
-        /// NOTIFY / SYNC) land in follow-up commits.
+        /// Unknown msg_id — let the dispatch chain try the next
+        /// handler. DNS_RESULT (0x0612) and DNS_NOTIFY (0x0615)
+        /// are server-to-client only and never inbound here, so
+        /// they fall through this branch too.
         return GN_PROPAGATION_CONTINUE;
     }
 }
