@@ -392,6 +392,69 @@ gn_message_t make_wire_env(std::uint32_t msg_id, gn_conn_id_t conn,
 
 } // namespace
 
+TEST(DnsWire_StoreBacked, PutFiresNotifyToMatchingSubscriber) {
+    /// Subscribe, then PUT under the watched key; the handler
+    /// fans out a DNS_NOTIFY to the subscriber alongside the
+    /// PUT ack. Validates the wire-side put → subscriber fan-out
+    /// path end to end with a real store backend.
+    ExtensionHost host;
+    StubStore stub;
+    auto vt = stub.make_vtable();
+    host.extensions[GN_EXT_STORE] = {GN_EXT_STORE_VERSION, &vt};
+
+    auto api = make_api_with_store(host);
+    DnsHandler h(&api);
+    ASSERT_TRUE(h.has_store());
+
+    /// Subscribe conn 30 to exact key "watched". DNS_SUBSCRIBE
+    /// layout per §3.5: req(8) + mode(1) + reserved(1) +
+    /// key_len(2) + reserved(4) + key bytes = 16 + key.
+    auto sub_payload = std::vector<std::uint8_t>(16 + 7);
+    gn::endian::write_be<std::uint64_t>(
+        {sub_payload.data() + 0, 8}, 1ULL);
+    sub_payload[8] = 0;  // mode exact
+    gn::endian::write_be<std::uint16_t>(
+        {sub_payload.data() + 10, 2},
+        static_cast<std::uint16_t>(7));
+    std::memcpy(sub_payload.data() + 16, "watched", 7);
+    auto env_sub = make_wire_env(kMsgSubscribe, /*conn*/ 30, sub_payload);
+    EXPECT_EQ(h.handle_message(&env_sub), GN_PROPAGATION_CONSUMED);
+    EXPECT_EQ(h.subscription_count(), 1u);
+
+    /// Drop the SUBSCRIBE ack so the next assertion sees only
+    /// the PUT-driven traffic.
+    {
+        std::lock_guard lk(host.send_mu);
+        host.sent_payloads.clear();
+        host.sent_conns.clear();
+        host.sent_msg_ids.clear();
+    }
+
+    /// PUT under the watched key from a different conn — handler
+    /// emits PUT ack to the writer + NOTIFY to the subscriber.
+    const std::vector<std::uint8_t> value{0xfe, 0xed};
+    auto put = make_put_payload(/*req*/ 99, /*ttl*/ 0, /*flags*/ 0,
+                                  "watched", value);
+    auto env_put = make_wire_env(kMsgPut, /*conn*/ 60, put);
+    EXPECT_EQ(h.handle_message(&env_put), GN_PROPAGATION_CONSUMED);
+
+    std::lock_guard lk(host.send_mu);
+    /// Two sends: DNS_RESULT (ack, to conn 60) + DNS_NOTIFY (to
+    /// conn 30). The order of dispatch is deterministic — the
+    /// ack lands first because the notify_wire_subscribers call
+    /// follows it in handle_message.
+    ASSERT_EQ(host.sent_msg_ids.size(), 2u);
+    EXPECT_EQ(host.sent_msg_ids[0], kMsgResult);
+    EXPECT_EQ(host.sent_conns[0], 60u);
+    EXPECT_EQ(host.sent_msg_ids[1], kMsgNotify);
+    EXPECT_EQ(host.sent_conns[1], 30u);
+    /// DNS_NOTIFY layout §3.7: timestamp(8) + event(1) + reserved(1)
+    /// + Record. event = 0 for PUT.
+    const auto& notify = host.sent_payloads[1];
+    ASSERT_GE(notify.size(), 10u);
+    EXPECT_EQ(notify[8], 0u);  // kEventPut
+}
+
 TEST(DnsWire_StoreBacked, PrefixModeGetEnumeratesMatchingKeys) {
     ExtensionHost host;
     StubStore stub;
