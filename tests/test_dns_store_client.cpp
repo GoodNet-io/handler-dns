@@ -392,6 +392,107 @@ gn_message_t make_wire_env(std::uint32_t msg_id, gn_conn_id_t conn,
 
 } // namespace
 
+TEST(DnsExtensionCoherence, ExtensionPutTxtFiresWireNotify) {
+    /// In-process callers using the `gn.dns` extension's
+    /// put_record on TXT records must fan out DNS_NOTIFY to
+    /// wire subscribers — same behaviour as wire-side DNS_PUT.
+    /// Without this hook, wire subscribers stay stale on local
+    /// writes.
+    ExtensionHost host;
+    StubStore stub;
+    auto vt = stub.make_vtable();
+    host.extensions[GN_EXT_STORE] = {GN_EXT_STORE_VERSION, &vt};
+
+    auto api = make_api_with_store(host);
+    DnsHandler h(&api);
+    ASSERT_TRUE(h.has_store());
+
+    /// Subscribe conn 200 to "local.txt".
+    auto sub_payload = std::vector<std::uint8_t>(16 + 9);
+    gn::endian::write_be<std::uint64_t>(
+        {sub_payload.data() + 0, 8}, 1ULL);
+    sub_payload[8] = 0;  // exact mode
+    gn::endian::write_be<std::uint16_t>(
+        {sub_payload.data() + 10, 2}, static_cast<std::uint16_t>(9));
+    std::memcpy(sub_payload.data() + 16, "local.txt", 9);
+    auto env_sub = make_wire_env(kMsgSubscribe, 200, sub_payload);
+    EXPECT_EQ(h.handle_message(&env_sub), GN_PROPAGATION_CONSUMED);
+
+    /// Drop the SUBSCRIBE ack.
+    {
+        std::lock_guard lk(host.send_mu);
+        host.sent_payloads.clear();
+        host.sent_conns.clear();
+        host.sent_msg_ids.clear();
+    }
+
+    /// Extension write — bypasses the wire dispatch but should
+    /// still notify the wire subscriber for TXT writes.
+    const auto* api_vtable = h.extension_vtable();
+    ASSERT_NE(api_vtable, nullptr);
+    const std::vector<std::uint8_t> value{0xab, 0xcd};
+    const int rc = api_vtable->put_record(
+        api_vtable->ctx, "local.txt", 9,
+        /*type*/ static_cast<std::uint16_t>(16),  // TXT
+        value.data(), value.size(), /*ttl*/ 0, /*flags*/ 0);
+    EXPECT_EQ(rc, 0);
+
+    std::lock_guard lk(host.send_mu);
+    /// Exactly one send — the DNS_NOTIFY fan-out (no ack on the
+    /// extension surface; the C ABI returns the status code).
+    ASSERT_EQ(host.sent_msg_ids.size(), 1u);
+    EXPECT_EQ(host.sent_msg_ids[0], kMsgNotify);
+    EXPECT_EQ(host.sent_conns[0], 200u);
+    /// Event byte at offset 8 = 0 / kEventPut.
+    EXPECT_EQ(host.sent_payloads[0][8], 0u);
+}
+
+TEST(DnsExtensionCoherence, ExtensionPutNonTxtDoesNotFireWireNotify) {
+    /// Non-TXT RR types stay extension-only — wire DNS_SUBSCRIBE
+    /// carries no type field, so the wire surface implicitly
+    /// works in TXT space. An A-record write through the
+    /// extension API must not notify wire subscribers; otherwise
+    /// they receive a payload they can't interpret.
+    ExtensionHost host;
+    StubStore stub;
+    auto vt = stub.make_vtable();
+    host.extensions[GN_EXT_STORE] = {GN_EXT_STORE_VERSION, &vt};
+
+    auto api = make_api_with_store(host);
+    DnsHandler h(&api);
+    ASSERT_TRUE(h.has_store());
+
+    /// Subscribe to a name that the A-record write will land on.
+    auto sub_payload = std::vector<std::uint8_t>(16 + 4);
+    gn::endian::write_be<std::uint64_t>(
+        {sub_payload.data() + 0, 8}, 1ULL);
+    sub_payload[8] = 0;
+    gn::endian::write_be<std::uint16_t>(
+        {sub_payload.data() + 10, 2}, static_cast<std::uint16_t>(4));
+    std::memcpy(sub_payload.data() + 16, "host", 4);
+    auto env_sub = make_wire_env(kMsgSubscribe, 200, sub_payload);
+    EXPECT_EQ(h.handle_message(&env_sub), GN_PROPAGATION_CONSUMED);
+    {
+        std::lock_guard lk(host.send_mu);
+        host.sent_payloads.clear();
+        host.sent_conns.clear();
+        host.sent_msg_ids.clear();
+    }
+
+    /// Extension A-record write.
+    const auto* api_vtable = h.extension_vtable();
+    const std::vector<std::uint8_t> ip{192, 0, 2, 1};
+    const int rc = api_vtable->put_record(
+        api_vtable->ctx, "host", 4,
+        /*type A*/ static_cast<std::uint16_t>(1),
+        ip.data(), ip.size(), /*ttl*/ 0, /*flags*/ 0);
+    EXPECT_EQ(rc, 0);
+
+    std::lock_guard lk(host.send_mu);
+    EXPECT_TRUE(host.sent_msg_ids.empty())
+        << "non-TXT writes must not fire wire NOTIFY";
+}
+
 TEST(DnsWire_StoreBacked, SyncReturnsRecordsAfterSinceTimestamp) {
     ExtensionHost host;
     StubStore stub;
