@@ -478,27 +478,84 @@ gn_propagation_t DnsHandler::handle_message(const gn_message_t* env) {
     }
 
     case kMsgGet: {
-        /// Exact mode is the only one wired today. Prefix and
-        /// since modes require backend operations the Resolver
-        /// does not expose yet — they ack with kStatusBadSize as
-        /// a documented placeholder until the resolver grows the
-        /// surface.
         const auto v = parse_get(payload);
         if (!v) {
             const auto resp = encode_result_ack(0, kStatusBadSize);
             (void)reply(sender, resp);
             return GN_PROPAGATION_CONSUMED;
         }
-        if (v->mode != 0) {  // only exact-mode supported
+
+        std::vector<ResolvedRecord> records;
+        const auto cap = v->max_results == 0
+            ? 1u
+            : static_cast<std::uint32_t>(v->max_results);
+
+        switch (v->mode) {
+        case 0: { // exact
+            records = resolver_.resolve(
+                v->key, RrType::TXT, cap);
+            break;
+        }
+        case 1: { // prefix — bypass the Resolver and walk the
+                  // store directly with the TXT-prefixed key.
+            if (store_.has_value()) {
+                /// Store key = 2-byte type + "/" + name; the
+                /// wire `key` is a name prefix, so the store
+                /// prefix is `type + "/" + name_prefix`.
+                std::string prefix;
+                const auto t = rrtype_value(RrType::TXT);
+                prefix.reserve(3 + v->key.size());
+                prefix.push_back(static_cast<char>((t >> 8) & 0xFF));
+                prefix.push_back(static_cast<char>(t & 0xFF));
+                prefix.push_back('/');
+                prefix.append(v->key);
+                auto raw = store_->get_prefix(prefix, cap);
+                records.reserve(raw.size());
+                for (auto& r : raw) {
+                    if (auto pair = parse_store_key(r.key)) {
+                        if (pair->first != RrType::TXT) continue;
+                        ResolvedRecord rec;
+                        rec.name         = std::move(pair->second);
+                        rec.type         = pair->first;
+                        rec.rdata        = std::move(r.value);
+                        rec.ttl_s        = static_cast<std::uint32_t>(
+                            std::min<std::uint64_t>(r.ttl_s, 0xFFFFFFFFu));
+                        rec.timestamp_us = r.timestamp_us;
+                        records.push_back(std::move(rec));
+                    }
+                }
+            }
+            break;
+        }
+        case 2: { // since — return TXT records whose timestamp
+                  // > since_us, capped at max_results.
+            if (store_.has_value()) {
+                auto raw = store_->get_since(v->since_us, cap);
+                records.reserve(raw.size());
+                for (auto& r : raw) {
+                    if (auto pair = parse_store_key(r.key)) {
+                        if (pair->first != RrType::TXT) continue;
+                        ResolvedRecord rec;
+                        rec.name         = std::move(pair->second);
+                        rec.type         = pair->first;
+                        rec.rdata        = std::move(r.value);
+                        rec.ttl_s        = static_cast<std::uint32_t>(
+                            std::min<std::uint64_t>(r.ttl_s, 0xFFFFFFFFu));
+                        rec.timestamp_us = r.timestamp_us;
+                        records.push_back(std::move(rec));
+                    }
+                }
+            }
+            break;
+        }
+        default: {
             const auto resp = encode_result_ack(
                 v->request_id, kStatusBadSize);
             (void)reply(sender, resp);
             return GN_PROPAGATION_CONSUMED;
         }
-        auto records = resolver_.resolve(
-            v->key, RrType::TXT,
-            v->max_results == 0 ? 1u
-                                : static_cast<std::uint32_t>(v->max_results));
+        }
+
         const auto status = records.empty()
             ? kStatusNotFound : kStatusOk;
         const auto resp = encode_result_records(

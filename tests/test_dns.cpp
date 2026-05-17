@@ -353,7 +353,11 @@ TEST(DnsWire, GetEnvelopeBadSizeAcks) {
     EXPECT_EQ(host.sent_payloads[0][8], 1u);  // kStatusBadSize
 }
 
-TEST(DnsWire, GetEnvelopePrefixModeUnsupportedAcksBadSize) {
+TEST(DnsWire, GetEnvelopePrefixModeWithoutStoreEmpty) {
+    /// Prefix mode is now wired but needs a store extension to
+    /// have anything to return. Without a store the handler
+    /// replies with DNS_RESULT carrying kStatusNotFound and zero
+    /// records — the caller's correlation completes regardless.
     StubHost host;
     auto api = make_stub_api(host);
     DnsHandler h(&api);
@@ -366,10 +370,34 @@ TEST(DnsWire, GetEnvelopePrefixModeUnsupportedAcksBadSize) {
 
     std::lock_guard lk(host.mu);
     ASSERT_EQ(host.send_calls.load(), 1);
-    EXPECT_EQ(host.sent_payloads[0][8], 1u);  // kStatusBadSize for now
+    EXPECT_EQ(host.sent_msg_ids[0], kMsgResult);
+    EXPECT_EQ(host.sent_payloads[0][8], 2u);  // kStatusNotFound
     EXPECT_EQ(gn::endian::read_be<std::uint64_t>(
                   {host.sent_payloads[0].data() + 0, 8}),
               11u);
+    /// Zero records on the empty-store path.
+    EXPECT_EQ(gn::endian::read_be<std::uint16_t>(
+                  {host.sent_payloads[0].data() + 10, 2}),
+              0u);
+}
+
+TEST(DnsWire, GetEnvelopeSinceModeWithoutStoreEmpty) {
+    /// Since mode mirrors prefix: wired but requires a store to
+    /// produce records. Without one, replies with NotFound + zero
+    /// records.
+    StubHost host;
+    auto api = make_stub_api(host);
+    DnsHandler h(&api);
+
+    const auto payload = make_get_payload(
+        /*req*/ 22, /*mode*/ 2 /*since*/, /*max*/ 10,
+        /*since*/ 1000, "");
+    auto env = make_env(kMsgGet, /*conn*/ 9, payload);
+    EXPECT_EQ(h.handle_message(&env), GN_PROPAGATION_CONSUMED);
+
+    std::lock_guard lk(host.mu);
+    ASSERT_EQ(host.send_calls.load(), 1);
+    EXPECT_EQ(host.sent_payloads[0][8], 2u);  // kStatusNotFound
 }
 
 TEST(DnsWire, GetEnvelopeNotFoundWithEmptyResolver) {
