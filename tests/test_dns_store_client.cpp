@@ -392,6 +392,67 @@ gn_message_t make_wire_env(std::uint32_t msg_id, gn_conn_id_t conn,
 
 } // namespace
 
+TEST(DnsWire_StoreBacked, DeleteFiresNotifyAfterPut) {
+    /// Subscribe + PUT seeds a record. Then DELETE removes it,
+    /// firing DNS_NOTIFY with event = 1 / kEventDelete to the
+    /// matching subscriber. Validates the wire-side delete →
+    /// notify path with a real store backend.
+    ExtensionHost host;
+    StubStore stub;
+    auto vt = stub.make_vtable();
+    host.extensions[GN_EXT_STORE] = {GN_EXT_STORE_VERSION, &vt};
+
+    auto api = make_api_with_store(host);
+    DnsHandler h(&api);
+    ASSERT_TRUE(h.has_store());
+
+    /// Subscribe conn 80 to "ephemeral".
+    auto sub_payload = std::vector<std::uint8_t>(16 + 9);
+    gn::endian::write_be<std::uint64_t>(
+        {sub_payload.data() + 0, 8}, 1ULL);
+    sub_payload[8] = 0;  // exact mode
+    gn::endian::write_be<std::uint16_t>(
+        {sub_payload.data() + 10, 2}, static_cast<std::uint16_t>(9));
+    std::memcpy(sub_payload.data() + 16, "ephemeral", 9);
+    auto env_sub = make_wire_env(kMsgSubscribe, 80, sub_payload);
+    EXPECT_EQ(h.handle_message(&env_sub), GN_PROPAGATION_CONSUMED);
+
+    /// PUT seeds the key.
+    const std::vector<std::uint8_t> value{0xde, 0xad};
+    auto put = make_put_payload(2, 0, 0, "ephemeral", value);
+    auto env_put = make_wire_env(kMsgPut, 70, put);
+    EXPECT_EQ(h.handle_message(&env_put), GN_PROPAGATION_CONSUMED);
+
+    /// Clear accumulated sends from SUBSCRIBE + PUT so the next
+    /// assertion only sees the DELETE traffic.
+    {
+        std::lock_guard lk(host.send_mu);
+        host.sent_payloads.clear();
+        host.sent_conns.clear();
+        host.sent_msg_ids.clear();
+    }
+
+    /// DELETE from a third conn — handler emits DELETE ack to the
+    /// writer + DNS_NOTIFY to the watching subscriber.
+    std::vector<std::uint8_t> del(16 + 9);
+    gn::endian::write_be<std::uint64_t>({del.data() + 0, 8}, 3ULL);
+    gn::endian::write_be<std::uint16_t>(
+        {del.data() + 8, 2}, static_cast<std::uint16_t>(9));
+    std::memcpy(del.data() + 16, "ephemeral", 9);
+    auto env_del = make_wire_env(kMsgDelete, 90, del);
+    EXPECT_EQ(h.handle_message(&env_del), GN_PROPAGATION_CONSUMED);
+
+    std::lock_guard lk(host.send_mu);
+    ASSERT_EQ(host.sent_msg_ids.size(), 2u);
+    EXPECT_EQ(host.sent_msg_ids[0], kMsgResult);
+    EXPECT_EQ(host.sent_conns[0], 90u);
+    EXPECT_EQ(host.sent_payloads[0][8], 0u);  // kStatusOk on hit
+    EXPECT_EQ(host.sent_msg_ids[1], kMsgNotify);
+    EXPECT_EQ(host.sent_conns[1], 80u);
+    /// Event byte at offset 8 = 1 / kEventDelete.
+    EXPECT_EQ(host.sent_payloads[1][8], 1u);
+}
+
 TEST(DnsWire_StoreBacked, PutFiresNotifyToMatchingSubscriber) {
     /// Subscribe, then PUT under the watched key; the handler
     /// fans out a DNS_NOTIFY to the subscriber alongside the
