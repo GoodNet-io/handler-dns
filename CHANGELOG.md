@@ -5,6 +5,53 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions track the kernel ABI through `gn_handler_vtable_t` /
 `gn_dns_api_t`.
 
+## [Unreleased]
+
+### Wire dispatch — all 7 envelopes live
+
+`handle_message` previously returned `GN_PROPAGATION_CONTINUE`
+for every msg_id; local callers reached the resolver only
+through the `gn.dns` extension vtable. This release ships full
+wire-side dispatch covering the seven `DNS_*` envelopes per
+`docs/contracts/dns.en.md`:
+
+- `DNS_PUT` (0x0610) — write through `Resolver::put_record`
+  with implicit type = `RrType::TXT` (the wire treats values
+  as opaque bytes per the locked v1.x contract).
+- `DNS_GET` (0x0611) — exact mode through the typed Resolver;
+  prefix + since modes walk the store directly via
+  `StoreClient::get_prefix` / `get_since` with the TXT-prefixed
+  key, decoded results filtered to TXT.
+- `DNS_RESULT` (0x0612) — response envelope shape per §3.3 + §3.6.
+- `DNS_DELETE` (0x0613) — routed through `Resolver::delete_record`.
+- `DNS_SUBSCRIBE` (0x0614) — exact + prefix modes; subscribers
+  recorded under `wire_subs_`, pruned via the kernel's
+  conn-state DISCONNECTED channel.
+- `DNS_NOTIFY` (0x0615) — auto-dispatched whenever a wire-side
+  or extension-side TXT PUT/DELETE matches a subscriber's key.
+- `DNS_SYNC` (0x0616) — symmetric envelope; request carries
+  `record_count = 0`, reply appends records from
+  `StoreClient::get_since` filtered to TXT.
+
+### msg_id constant rename to match the contract
+
+The constants `kMsgResolve` / `kMsgPutRecord` / `kMsgRecordResult`
+had value-pair inverted from `docs/contracts/dns.en.md` §2.2.
+Renamed to `kMsgPut` / `kMsgGet` / `kMsgResult` so the names match
+the contract's `DNS_PUT` / `DNS_GET` / `DNS_RESULT` mapping. The
+remaining four (`kMsgDelete`, `kMsgSubscribe`, `kMsgNotify`,
+`kMsgSync`) already matched.
+
+### Wire/extension notification coherence on TXT
+
+Extension-API callers using `gn.dns.put_record` /
+`gn.dns.delete_record` on `RrType::TXT` records now also fan out
+`DNS_NOTIFY` to matching wire subscribers. Without this hook,
+an in-process write (e.g. `link-ice`'s SRV resolver) would
+update a record under the hood while wire subscribers stayed
+stale. Non-TXT writes remain extension-only — the wire surface
+has no type field and cannot interpret non-TXT records anyway.
+
 ## [1.0.0-rc1] — 2026-05-13
 
 Plugin shipped as a real DNS service over the `gn.handler.store`
