@@ -392,6 +392,67 @@ gn_message_t make_wire_env(std::uint32_t msg_id, gn_conn_id_t conn,
 
 } // namespace
 
+TEST(DnsWire_StoreBacked, PrefixModeGetEnumeratesMatchingKeys) {
+    ExtensionHost host;
+    StubStore stub;
+    auto vt = stub.make_vtable();
+    host.extensions[GN_EXT_STORE] = {GN_EXT_STORE_VERSION, &vt};
+
+    auto api = make_api_with_store(host);
+    DnsHandler h(&api);
+    ASSERT_TRUE(h.has_store());
+
+    /// Seed three records — two under prefix "peer/", one outside.
+    const std::vector<std::uint8_t> v1{0x01};
+    const std::vector<std::uint8_t> v2{0x02};
+    const std::vector<std::uint8_t> v3{0x03};
+    auto put1 = make_put_payload(1, 0, 0, "peer/alice", v1);
+    auto put2 = make_put_payload(2, 0, 0, "peer/bob",   v2);
+    auto put3 = make_put_payload(3, 0, 0, "service/x",  v3);
+    {
+        auto e = make_wire_env(kMsgPut, 7, put1);
+        EXPECT_EQ(h.handle_message(&e), GN_PROPAGATION_CONSUMED);
+    }
+    {
+        auto e = make_wire_env(kMsgPut, 7, put2);
+        EXPECT_EQ(h.handle_message(&e), GN_PROPAGATION_CONSUMED);
+    }
+    {
+        auto e = make_wire_env(kMsgPut, 7, put3);
+        EXPECT_EQ(h.handle_message(&e), GN_PROPAGATION_CONSUMED);
+    }
+
+    /// Drop the three PUT acks so the next assertion sees only
+    /// the prefix-mode reply.
+    {
+        std::lock_guard lk(host.send_mu);
+        host.sent_payloads.clear();
+        host.sent_conns.clear();
+        host.sent_msg_ids.clear();
+    }
+
+    /// Prefix-mode DNS_GET on "peer/" returns the two matching
+    /// records (alice + bob). Order is implementation-defined —
+    /// the test counts records and decodes names regardless of
+    /// order.
+    auto getp = make_get_payload(/*req*/ 10, /*mode*/ 1, /*max*/ 10,
+                                   "peer/");
+    auto env = make_wire_env(kMsgGet, /*conn*/ 7, getp);
+    EXPECT_EQ(h.handle_message(&env), GN_PROPAGATION_CONSUMED);
+
+    std::lock_guard lk(host.send_mu);
+    ASSERT_EQ(host.sent_payloads.size(), 1u);
+    const auto& reply = host.sent_payloads[0];
+    EXPECT_EQ(host.sent_msg_ids[0], kMsgResult);
+    EXPECT_EQ(reply[8], 0u);  // kStatusOk
+    const auto rec_count = gn::endian::read_be<std::uint16_t>(
+        {reply.data() + 10, 2});
+    EXPECT_EQ(rec_count, 2u);
+    EXPECT_EQ(gn::endian::read_be<std::uint64_t>(
+                  {reply.data() + 0, 8}),
+              10u);
+}
+
 TEST(DnsWire_StoreBacked, PutWriteThenWireGetReadsBack) {
     ExtensionHost host;
     StubStore stub;
