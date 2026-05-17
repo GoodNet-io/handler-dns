@@ -111,6 +111,14 @@ public:
     }
 
 private:
+    /// Frame a DNS_RESULT envelope and hand it to the kernel for
+    /// dispatch back to the sender of the originating request.
+    /// Returns the underlying `send` result; the handler discards
+    /// it (the response is best-effort — a dropped reply does not
+    /// break the contract).
+    gn_result_t reply(gn_conn_id_t conn,
+                      std::span<const std::uint8_t> payload);
+
     /// Extension thunks bridging the C ABI to the Resolver.
     static int  ext_resolve(void* ctx, const char* name, size_t name_len,
                              std::uint16_t type, std::uint32_t max_results,

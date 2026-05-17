@@ -3,6 +3,15 @@
 
 #include "dns_records.hpp"
 
+#include <sdk/cpp/endian.hpp>
+
+#include <cstring>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <vector>
+
 namespace gn::handler::dns {
 
 namespace {
@@ -17,6 +26,69 @@ std::unique_ptr<IUpstreamResolver> make_upstream() {
 #else
     return nullptr;
 #endif
+}
+
+/// DNS_RESULT status codes per `docs/contracts/dns.en.md` §3.3.
+constexpr std::uint8_t kStatusOk           = 0;
+constexpr std::uint8_t kStatusBadSize      = 1;
+constexpr std::uint8_t kStatusNotFound     = 2;
+constexpr std::uint8_t kStatusBackendError = 3;
+
+/// DNS_PUT header layout per §3.1: req(8) + ttl(8) + flags(1) +
+/// reserved(1) + key_len(2) + value_len(4) = 24 bytes.
+constexpr std::size_t kHeaderPut = 24;
+
+/// Parsed view of a DNS_PUT envelope payload. The key + value
+/// spans borrow from the wire bytes — caller copies before any
+/// re-entry into the handler's backend.
+struct PutView {
+    std::uint64_t            request_id;
+    std::uint64_t            ttl_s;
+    std::uint8_t             flags;
+    std::string_view         key;
+    std::span<const std::uint8_t> value;
+};
+
+[[nodiscard]] std::optional<PutView>
+parse_put(std::span<const std::uint8_t> payload) {
+    if (payload.size() < kHeaderPut) return std::nullopt;
+    PutView v{};
+    v.request_id = gn::endian::read_be<std::uint64_t>(
+        {payload.data() + 0, 8});
+    v.ttl_s = gn::endian::read_be<std::uint64_t>(
+        {payload.data() + 8, 8});
+    v.flags = payload[16];
+    // payload[17] reserved
+    const auto key_len = gn::endian::read_be<std::uint16_t>(
+        {payload.data() + 18, 2});
+    const auto value_len = gn::endian::read_be<std::uint32_t>(
+        {payload.data() + 20, 4});
+    if (kHeaderPut + key_len + value_len != payload.size()) {
+        return std::nullopt;
+    }
+    if (key_len == 0 || key_len > 256) return std::nullopt;
+    if (value_len > 65'536) return std::nullopt;
+
+    v.key = std::string_view(
+        reinterpret_cast<const char*>(payload.data() + kHeaderPut),
+        key_len);
+    v.value = std::span<const std::uint8_t>(
+        payload.data() + kHeaderPut + key_len, value_len);
+    return v;
+}
+
+/// Serialize a DNS_RESULT envelope. Layout per §3.3: req(8) +
+/// status(1) + reserved(1) + record_count(2) + records (omitted
+/// for PUT / DELETE acks).
+[[nodiscard]] std::vector<std::uint8_t>
+encode_result_ack(std::uint64_t request_id, std::uint8_t status) {
+    std::vector<std::uint8_t> out(12, 0);
+    gn::endian::write_be<std::uint64_t>(
+        {out.data() + 0, 8}, request_id);
+    out[8] = status;
+    // out[9]   reserved zero
+    // out[10..12] record_count == 0
+    return out;
 }
 
 }  // namespace
@@ -41,14 +113,59 @@ DnsHandler::DnsHandler(const host_api_t* api)
 DnsHandler::~DnsHandler() = default;
 
 gn_propagation_t DnsHandler::handle_message(const gn_message_t* env) {
-    /// Wire-side dispatch (DNS_RESOLVE / DNS_PUT_RECORD / ...) is
-    /// not wired yet — local callers reach the resolver through the
-    /// `gn.dns` extension vtable above (`resolve` / `put_record` /
-    /// `delete_record`), which is what `link-ice`'s SRV expansion
-    /// uses. The wire envelopes get filled in once a remote consumer
-    /// needs them.
-    (void)env;
-    return GN_PROPAGATION_CONTINUE;
+    if (env == nullptr || env->payload == nullptr) {
+        return GN_PROPAGATION_CONTINUE;
+    }
+
+    const std::span<const std::uint8_t> payload{
+        env->payload, env->payload_size};
+    const gn_conn_id_t sender = env->conn_id;
+
+    switch (env->msg_id) {
+    case kMsgPut: {
+        /// The wire `value` is opaque bytes per the contract
+        /// (§3.1). Internally we route the write through the
+        /// typed `Resolver` using `RrType::TXT` (16) — the
+        /// well-known DNS record for arbitrary text bytes — so
+        /// wire-side DNS_PUT/GET round-trips through the same
+        /// backend records the extension API exposes. A future
+        /// minor of the contract can promote the wire `value` to
+        /// carry an explicit `type` prefix; right now the wire
+        /// is a generic KV with TXT as the only legible type.
+        const auto v = parse_put(payload);
+        if (!v) {
+            const auto resp = encode_result_ack(/*req*/ 0, kStatusBadSize);
+            (void)reply(sender, resp);
+            return GN_PROPAGATION_CONSUMED;
+        }
+        /// `Resolver::put_record` takes `uint32_t ttl_s`; the wire
+        /// carries `uint64_t` for future expansion. Clamp to the
+        /// backend's accepted range and treat zero as "permanent".
+        const std::uint32_t ttl = v->ttl_s > 0xFFFFFFFFu
+            ? 0xFFFFFFFFu
+            : static_cast<std::uint32_t>(v->ttl_s);
+        const bool ok = resolver_.put_record(
+            v->key, RrType::TXT, v->value, ttl, v->flags);
+        const auto resp = encode_result_ack(
+            v->request_id, ok ? kStatusOk : kStatusBackendError);
+        (void)reply(sender, resp);
+        return GN_PROPAGATION_CONSUMED;
+    }
+
+    default:
+        /// Remaining envelopes (GET / RESULT / DELETE / SUBSCRIBE /
+        /// NOTIFY / SYNC) land in follow-up commits.
+        return GN_PROPAGATION_CONTINUE;
+    }
+}
+
+gn_result_t DnsHandler::reply(gn_conn_id_t conn,
+                                std::span<const std::uint8_t> payload) {
+    if (api_ == nullptr || api_->send == nullptr) {
+        return GN_ERR_NOT_IMPLEMENTED;
+    }
+    return api_->send(api_->host_ctx, conn, kMsgResult,
+                       payload.data(), payload.size());
 }
 
 // ── extension thunks ────────────────────────────────────────────────────────
