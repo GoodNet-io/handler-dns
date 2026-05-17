@@ -156,6 +156,49 @@ std::vector<std::uint8_t> make_get_payload(std::uint64_t request_id,
     return out;
 }
 
+std::vector<std::uint8_t> make_delete_payload(std::uint64_t request_id,
+                                                 std::string_view key) {
+    std::vector<std::uint8_t> out(16 + key.size());
+    gn::endian::write_be<std::uint64_t>({out.data() + 0, 8}, request_id);
+    gn::endian::write_be<std::uint16_t>(
+        {out.data() + 8, 2}, static_cast<std::uint16_t>(key.size()));
+    // out[10..16] reserved
+    std::memcpy(out.data() + 16, key.data(), key.size());
+    return out;
+}
+
+TEST(DnsWire, DeleteEnvelopeBadSizeAcks) {
+    StubHost host;
+    auto api = make_stub_api(host);
+    DnsHandler h(&api);
+
+    const std::vector<std::uint8_t> truncated{0x00};
+    auto env = make_env(kMsgDelete, /*conn*/ 9, truncated);
+    EXPECT_EQ(h.handle_message(&env), GN_PROPAGATION_CONSUMED);
+
+    std::lock_guard lk(host.mu);
+    ASSERT_EQ(host.send_calls.load(), 1);
+    EXPECT_EQ(host.sent_msg_ids[0], kMsgResult);
+    EXPECT_EQ(host.sent_payloads[0][8], 1u);  // kStatusBadSize
+}
+
+TEST(DnsWire, DeleteEnvelopeNotFoundWhenEmpty) {
+    StubHost host;
+    auto api = make_stub_api(host);
+    DnsHandler h(&api);
+
+    const auto payload = make_delete_payload(/*req*/ 5, "missing");
+    auto env = make_env(kMsgDelete, /*conn*/ 9, payload);
+    EXPECT_EQ(h.handle_message(&env), GN_PROPAGATION_CONSUMED);
+
+    std::lock_guard lk(host.mu);
+    ASSERT_EQ(host.send_calls.load(), 1);
+    EXPECT_EQ(host.sent_payloads[0][8], 2u);  // kStatusNotFound
+    EXPECT_EQ(gn::endian::read_be<std::uint64_t>(
+                  {host.sent_payloads[0].data() + 0, 8}),
+              5u);
+}
+
 TEST(DnsWire, GetEnvelopeBadSizeAcks) {
     StubHost host;
     auto api = make_stub_api(host);

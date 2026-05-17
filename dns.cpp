@@ -53,6 +53,32 @@ struct PutView {
     std::span<const std::uint8_t> value;
 };
 
+/// DNS_DELETE header layout per §3.4: req(8) + key_len(2) +
+/// reserved(6) = 16 bytes.
+constexpr std::size_t kHeaderDelete = 16;
+
+struct DeleteView {
+    std::uint64_t    request_id;
+    std::string_view key;
+};
+
+[[nodiscard]] std::optional<DeleteView>
+parse_delete(std::span<const std::uint8_t> payload) {
+    if (payload.size() < kHeaderDelete) return std::nullopt;
+    DeleteView v{};
+    v.request_id = gn::endian::read_be<std::uint64_t>(
+        {payload.data() + 0, 8});
+    const auto key_len = gn::endian::read_be<std::uint16_t>(
+        {payload.data() + 8, 2});
+    // payload[10..16] reserved
+    if (kHeaderDelete + key_len != payload.size()) return std::nullopt;
+    if (key_len == 0 || key_len > 256) return std::nullopt;
+    v.key = std::string_view(
+        reinterpret_cast<const char*>(payload.data() + kHeaderDelete),
+        key_len);
+    return v;
+}
+
 struct GetView {
     std::uint64_t   request_id;
     std::uint8_t    mode;
@@ -201,6 +227,20 @@ gn_propagation_t DnsHandler::handle_message(const gn_message_t* env) {
     const gn_conn_id_t sender = env->conn_id;
 
     switch (env->msg_id) {
+    case kMsgDelete: {
+        const auto v = parse_delete(payload);
+        if (!v) {
+            const auto resp = encode_result_ack(0, kStatusBadSize);
+            (void)reply(sender, resp);
+            return GN_PROPAGATION_CONSUMED;
+        }
+        const bool ok = resolver_.delete_record(v->key, RrType::TXT);
+        const auto resp = encode_result_ack(
+            v->request_id, ok ? kStatusOk : kStatusNotFound);
+        (void)reply(sender, resp);
+        return GN_PROPAGATION_CONSUMED;
+    }
+
     case kMsgGet: {
         /// Exact mode is the only one wired today. Prefix and
         /// since modes require backend operations the Resolver
