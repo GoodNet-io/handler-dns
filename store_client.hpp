@@ -10,7 +10,7 @@
 /// wrappers around the C ABI slots. The vtable pointer is
 /// `@borrowed` from the store plugin and stays valid until the
 /// store plugin unregisters (host_api guarantee per
-/// `host-api.md` §query_extension).
+/// `host-api.en.md` §query_extension).
 
 #pragma once
 

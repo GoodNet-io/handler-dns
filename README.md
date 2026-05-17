@@ -59,7 +59,7 @@ The two share an msg-id neighbourhood — `store` keeps the legacy
 ## Wire format
 
 Byte-layout tables for every envelope live in
-[`docs/contracts/dns.md`](../../../docs/contracts/dns.en.md) in the
+[`docs/contracts/dns.en.md`](../../../docs/contracts/dns.en.md) in the
 kernel monorepo. TL;DR: big-endian length-prefixed binary, RFC-1035
 name encoding for record bodies. Local callers use the `gn.dns`
 extension vtable directly; the wire envelopes are reserved for
@@ -70,7 +70,7 @@ remote-dispatch consumers.
 * `sdk/cpp/dns.hpp` (the SDK hostname-resolver helper —
   pure-function `tcp://example.com:443` → IP literal rewrite at
   connect time). See
-  [`docs/contracts/hostname-resolver.md`](../../../docs/contracts/hostname-resolver.en.md).
+  [`docs/contracts/hostname-resolver.en.md`](../../../docs/contracts/hostname-resolver.en.md).
 
 ## Roadmap
 

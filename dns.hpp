@@ -18,7 +18,7 @@
 ///   * 0x0616  DNS_SYNC         — symmetric: replicate the typed namespace
 ///
 /// The wire layout for each envelope is published in
-/// `docs/contracts/dns.md`. Local callers reach the resolver through
+/// `docs/contracts/dns.en.md`. Local callers reach the resolver through
 /// the `gn.dns` extension vtable (`resolve` / `put_record` /
 /// `delete_record`); the wire envelopes above stay reserved for the
 /// remote-dispatch path once a consumer needs it.
