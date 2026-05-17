@@ -14,10 +14,14 @@
 #include <dns.hpp>
 #include <store_client.hpp>
 
+#include <sdk/cpp/endian.hpp>
 #include <sdk/cpp/test/stub_host.hpp>
 #include <sdk/extensions/store.h>
 #include <sdk/host_api.h>
 #include <sdk/types.h>
+
+#include <span>
+#include <vector>
 
 #include <cstring>
 #include <mutex>
@@ -176,9 +180,20 @@ private:
 /// Drop-in extension registry that gives the test control over
 /// what `query_extension_checked` returns. Stub_host's HandlerStub
 /// doesn't model extensions so we wire our own.
+///
+/// Now also captures `send` calls so wire-side tests can assert
+/// on the DNS_RESULT / DNS_NOTIFY envelopes the handler emits in
+/// response to inbound wire envelopes. Without this the wire
+/// dispatch path silently drops replies.
 struct ExtensionHost {
     std::unordered_map<std::string,
                        std::pair<std::uint32_t, const void*>> extensions;
+
+    /// Captured sends. Each entry records (conn, msg_id, payload).
+    std::mutex                                 send_mu;
+    std::vector<gn_conn_id_t>                  sent_conns;
+    std::vector<std::uint32_t>                 sent_msg_ids;
+    std::vector<std::vector<std::uint8_t>>     sent_payloads;
 
     static gn_result_t on_query(void* host_ctx,
                                  const char* name,
@@ -192,12 +207,26 @@ struct ExtensionHost {
         *out_vtable = it->second.second;
         return GN_OK;
     }
+
+    static gn_result_t on_send(void* host_ctx,
+                                gn_conn_id_t conn,
+                                std::uint32_t msg_id,
+                                const std::uint8_t* payload,
+                                std::size_t payload_size) {
+        auto* h = static_cast<ExtensionHost*>(host_ctx);
+        std::lock_guard lk(h->send_mu);
+        h->sent_conns.push_back(conn);
+        h->sent_msg_ids.push_back(msg_id);
+        h->sent_payloads.emplace_back(payload, payload + payload_size);
+        return GN_OK;
+    }
 };
 
 host_api_t make_api_with_store(ExtensionHost& host) {
     host_api_t api{};
     api.host_ctx                = &host;
     api.query_extension_checked = &ExtensionHost::on_query;
+    api.send                    = &ExtensionHost::on_send;
     return api;
 }
 
@@ -305,6 +334,132 @@ TEST(DnsHandler_Store, PicksUpStoreWhenRegistered) {
     auto hit = h.store()->get("ping");
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit.value().value, (std::vector<std::uint8_t>{0xee}));
+}
+
+// ── Wire dispatch + store integration ────────────────────────────────────
+//
+// Positive end-to-end: a DNS_PUT envelope writes through the resolver to
+// the StubStore; a subsequent DNS_GET reads back the same bytes via the
+// resolver's exact-mode lookup. Validates the type-prefixed key encoding
+// `RrType::TXT` uses, the wire-vs-extension surface coherence, and the
+// DNS_RESULT shape end-to-end.
+
+namespace {
+
+std::vector<std::uint8_t> make_put_payload(std::uint64_t request_id,
+                                             std::uint64_t ttl_s,
+                                             std::uint8_t flags,
+                                             std::string_view key,
+                                             std::span<const std::uint8_t> value) {
+    std::vector<std::uint8_t> out(24 + key.size() + value.size());
+    gn::endian::write_be<std::uint64_t>({out.data() + 0, 8}, request_id);
+    gn::endian::write_be<std::uint64_t>({out.data() + 8, 8}, ttl_s);
+    out[16] = flags;
+    gn::endian::write_be<std::uint16_t>(
+        {out.data() + 18, 2}, static_cast<std::uint16_t>(key.size()));
+    gn::endian::write_be<std::uint32_t>(
+        {out.data() + 20, 4}, static_cast<std::uint32_t>(value.size()));
+    std::memcpy(out.data() + 24, key.data(), key.size());
+    std::memcpy(out.data() + 24 + key.size(), value.data(), value.size());
+    return out;
+}
+
+std::vector<std::uint8_t> make_get_payload(std::uint64_t request_id,
+                                              std::uint8_t mode,
+                                              std::uint16_t max_results,
+                                              std::string_view key) {
+    std::vector<std::uint8_t> out(28 + key.size());
+    gn::endian::write_be<std::uint64_t>({out.data() + 0, 8}, request_id);
+    out[8] = mode;
+    gn::endian::write_be<std::uint16_t>(
+        {out.data() + 10, 2}, max_results);
+    gn::endian::write_be<std::uint64_t>({out.data() + 16, 8}, 0u);
+    gn::endian::write_be<std::uint16_t>(
+        {out.data() + 24, 2}, static_cast<std::uint16_t>(key.size()));
+    std::memcpy(out.data() + 28, key.data(), key.size());
+    return out;
+}
+
+gn_message_t make_wire_env(std::uint32_t msg_id, gn_conn_id_t conn,
+                             std::span<const std::uint8_t> payload) {
+    gn_message_t e{};
+    e.msg_id       = msg_id;
+    e.conn_id      = conn;
+    e.payload      = payload.data();
+    e.payload_size = payload.size();
+    return e;
+}
+
+} // namespace
+
+TEST(DnsWire_StoreBacked, PutWriteThenWireGetReadsBack) {
+    ExtensionHost host;
+    StubStore stub;
+    auto vt = stub.make_vtable();
+    host.extensions[GN_EXT_STORE] = {GN_EXT_STORE_VERSION, &vt};
+
+    auto api = make_api_with_store(host);
+    DnsHandler h(&api);
+    ASSERT_TRUE(h.has_store()) << "store extension must be visible";
+
+    /// Wire-side DNS_PUT under key "host.example". TTL 0 means
+    /// permanent — the Resolver's `lookup_store` skips the
+    /// expiry check, which would otherwise mark the record stale
+    /// because the StubStore's clock domain (incrementing small
+    /// counter) does not match the Resolver's wall-clock default.
+    const std::vector<std::uint8_t> value{0xa, 0xb, 0xc};
+    const auto put_payload = make_put_payload(
+        /*req*/ 100, /*ttl*/ 0, /*flags*/ 0,
+        "host.example", value);
+    auto env_put = make_wire_env(kMsgPut, /*conn*/ 17, put_payload);
+    EXPECT_EQ(h.handle_message(&env_put), GN_PROPAGATION_CONSUMED);
+
+    /// First captured send: DNS_RESULT with kStatusOk for the PUT.
+    {
+        std::lock_guard lk(host.send_mu);
+        ASSERT_EQ(host.sent_msg_ids.size(), 1u);
+        EXPECT_EQ(host.sent_msg_ids[0], kMsgResult);
+        EXPECT_EQ(host.sent_payloads[0][8], 0u);  // kStatusOk
+        EXPECT_EQ(gn::endian::read_be<std::uint64_t>(
+                      {host.sent_payloads[0].data() + 0, 8}),
+                  100u);
+    }
+
+    /// Wire-side DNS_GET on the same key reads back the stored value.
+    const auto get_payload = make_get_payload(
+        /*req*/ 200, /*mode*/ 0 /*exact*/, /*max*/ 1,
+        "host.example");
+    auto env_get = make_wire_env(kMsgGet, /*conn*/ 17, get_payload);
+    EXPECT_EQ(h.handle_message(&env_get), GN_PROPAGATION_CONSUMED);
+
+    std::lock_guard lk(host.send_mu);
+    ASSERT_EQ(host.sent_msg_ids.size(), 2u);
+    EXPECT_EQ(host.sent_msg_ids[1], kMsgResult);
+    const auto& reply = host.sent_payloads[1];
+    /// DNS_RESULT: req(8) + status(1) + reserved(1) + count(2) + Record.
+    EXPECT_EQ(reply[8], 0u);  // kStatusOk
+    EXPECT_EQ(gn::endian::read_be<std::uint64_t>(
+                  {reply.data() + 0, 8}),
+              200u);
+    EXPECT_EQ(gn::endian::read_be<std::uint16_t>(
+                  {reply.data() + 10, 2}),
+              1u);
+    /// Record body offset = 12. Layout: timestamp(8) + ttl(8) +
+    /// flags(1) + reserved(1) + key_len(2) + value_len(4) + key + value.
+    ASSERT_GE(reply.size(), 12u + 24u + 12u + 3u);
+    const std::size_t r = 12;
+    EXPECT_EQ(gn::endian::read_be<std::uint64_t>(
+                  {reply.data() + r + 8, 8}), 0u);  // ttl_s permanent
+    const auto key_len = gn::endian::read_be<std::uint16_t>(
+        {reply.data() + r + 18, 2});
+    EXPECT_EQ(key_len, 12u);  // "host.example"
+    const auto value_len = gn::endian::read_be<std::uint32_t>(
+        {reply.data() + r + 20, 4});
+    EXPECT_EQ(value_len, value.size());
+    EXPECT_EQ(0, std::memcmp(reply.data() + r + 24,
+                              "host.example", 12));
+    EXPECT_EQ(0, std::memcmp(reply.data() + r + 24 + 12,
+                              value.data(), value.size()));
 }
 
 }  // namespace
