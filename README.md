@@ -60,10 +60,22 @@ The two share an msg-id neighbourhood — `store` keeps the legacy
 
 Byte-layout tables for every envelope live in
 [`docs/contracts/dns.en.md`](../../../docs/contracts/dns.en.md) in the
-kernel monorepo. TL;DR: big-endian length-prefixed binary, RFC-1035
-name encoding for record bodies. Local callers use the `gn.dns`
-extension vtable directly; the wire envelopes are reserved for
-remote-dispatch consumers.
+kernel monorepo. TL;DR: big-endian length-prefixed binary. The
+wire surface dispatches all seven envelopes today — DNS_PUT /
+DNS_GET / DNS_RESULT / DNS_DELETE / DNS_SUBSCRIBE / DNS_NOTIFY /
+DNS_SYNC. Wire-side records use `RrType::TXT` as the implicit
+type since the locked v1.x layout has no explicit type field;
+the typed extension surface (`gn.dns` vtable) keeps the full RR
+taxonomy. Both routes share the same backend through the
+internal Resolver so local + remote callers stay coherent on
+the stored bytes.
+
+DNS_GET currently supports exact-match mode only; prefix and
+since modes ack `kStatusBadSize` until the resolver surface
+grows them. DNS_SUBSCRIBE accepts exact + prefix; subscribers
+receive DNS_NOTIFY whenever a wire-side PUT/DELETE matches
+their key, and the conn-state DISCONNECTED channel prunes
+subscribers that vanish without an explicit teardown.
 
 ## Not to be confused with
 
