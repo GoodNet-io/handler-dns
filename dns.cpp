@@ -190,9 +190,13 @@ encode_notify(std::uint64_t timestamp_us, std::uint8_t event,
     gn::endian::write_be<std::uint32_t>(
         {out.data() + r + 20, 4},
         static_cast<std::uint32_t>(rdata.size()));
-    std::memcpy(out.data() + r + 24, name.data(), name.size());
-    std::memcpy(out.data() + r + 24 + name.size(),
-                rdata.data(), rdata.size());
+    if (!name.empty()) {
+        std::memcpy(out.data() + r + 24, name.data(), name.size());
+    }
+    if (!rdata.empty()) {
+        std::memcpy(out.data() + r + 24 + name.size(),
+                    rdata.data(), rdata.size());
+    }
     return out;
 }
 
